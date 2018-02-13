@@ -6,15 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/signal"
-	"plugin"
 	"regexp"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,9 +34,6 @@ import (
 
 var gridByteBuffer bytes.Buffer
 
-var mapperPlugin func(*monstachemap.MapperPluginInput) (*monstachemap.MapperPluginOutput, error)
-var mapEnvs map[string]*executionEnv
-var mapIndexTypes map[string]*types.IndexTypeMapping
 var fileNamespaces map[string]bool
 var patchNamespaces map[string]bool
 
@@ -54,64 +48,6 @@ type httpServerCtx struct {
 	config     *types.ConfigOptions
 	shutdown   bool
 	started    time.Time
-}
-
-func normalizeIndexName(name string) (normal string) {
-	normal = strings.ToLower(strings.TrimPrefix(name, "_"))
-	return
-}
-
-func normalizeTypeName(name string) (normal string) {
-	normal = strings.TrimPrefix(name, "_")
-	return
-}
-
-func normalizeEsID(id string) (normal string) {
-	normal = strings.TrimPrefix(id, "_")
-	return
-}
-
-func defaultIndexTypeMapping(op *gtm.Op) *types.IndexTypeMapping {
-	return &types.IndexTypeMapping{
-		Namespace: op.Namespace,
-		Index:     normalizeIndexName(op.Namespace),
-		Type:      normalizeTypeName(op.GetCollection()),
-	}
-}
-
-func mapIndexType(op *gtm.Op) *types.IndexTypeMapping {
-	mapping := defaulttypes.IndexTypeMapping(op)
-	if mapIndexTypes != nil {
-		if m := mapIndexTypes[op.Namespace]; m != nil {
-			mapping = m
-		}
-	}
-	return mapping
-}
-
-func opIDToString(op *gtm.Op) string {
-	var opIDStr string
-	switch op.Id.(type) {
-	case bson.ObjectId:
-		opIDStr = op.Id.(bson.ObjectId).Hex()
-	case float64:
-		intID := int(op.Id.(float64))
-		if op.Id.(float64) == float64(intID) {
-			opIDStr = fmt.Sprintf("%v", intID)
-		} else {
-			opIDStr = fmt.Sprintf("%v", op.Id)
-		}
-	case float32:
-		intID := int(op.Id.(float32))
-		if op.Id.(float32) == float32(intID) {
-			opIDStr = fmt.Sprintf("%v", intID)
-		} else {
-			opIDStr = fmt.Sprintf("%v", op.Id)
-		}
-	default:
-		opIDStr = normalizeEsID(fmt.Sprintf("%v", op.Id))
-	}
-	return opIDStr
 }
 
 func convertSliceJavascript(a []interface{}) []interface{} {
@@ -275,14 +211,14 @@ func mapDataGolang(s *mgo.Session, op *gtm.Op) error {
 	return nil
 }
 
-func mapData(session *mgo.Session, config *ConfigOptions, op *gtm.Op) error {
+func mapData(session *mgo.Session, config *types.ConfigOptions, op *gtm.Op) error {
 	if config.MapperPluginPath != "" {
 		return mapDataGolang(session, op)
 	}
 	return mapDataJavascript(op)
 }
 
-func prepareDataForIndexing(config *ConfigOptions, op *gtm.Op) {
+func prepareDataForIndexing(config *types.ConfigOptions, op *gtm.Op) {
 	data := op.Data
 	if config.IndexOplogTime {
 		secs := int64(op.Timestamp >> 32)
@@ -326,7 +262,7 @@ func parseIndexMeta(op *gtm.Op) (meta *types.IndexingMeta) {
 	return meta
 }
 
-func addFileContent(s *mgo.Session, op *gtm.Op, config *ConfigOptions) (err error) {
+func addFileContent(s *mgo.Session, op *gtm.Op, config *types.ConfigOptions) (err error) {
 	session := s.Copy()
 	defer session.Close()
 	op.Data["file"] = ""
@@ -396,7 +332,7 @@ func ensureClusterTTL(session *mgo.Session) error {
 	})
 }
 
-func enableProcess(s *mgo.Session, config *ConfigOptions) (bool, error) {
+func enableProcess(s *mgo.Session, config *types.ConfigOptions) (bool, error) {
 	session := s.Copy()
 	defer session.Close()
 	col := session.DB("monstache").C("cluster")
@@ -419,12 +355,12 @@ func enableProcess(s *mgo.Session, config *ConfigOptions) (bool, error) {
 	return false, err
 }
 
-func resetClusterState(session *mgo.Session, config *ConfigOptions) error {
+func resetClusterState(session *mgo.Session, config *types.ConfigOptions) error {
 	col := session.DB("monstache").C("cluster")
 	return col.RemoveId(config.ResumeName)
 }
 
-func ensureEnabled(s *mgo.Session, config *ConfigOptions) (enabled bool, err error) {
+func ensureEnabled(s *mgo.Session, config *types.ConfigOptions) (enabled bool, err error) {
 	session := s.Copy()
 	defer session.Close()
 	col := session.DB("monstache").C("cluster")
@@ -446,7 +382,7 @@ func ensureEnabled(s *mgo.Session, config *ConfigOptions) (enabled bool, err err
 	return
 }
 
-func resumeWork(ctx *gtm.OpCtxMulti, session *mgo.Session, config *ConfigOptions) {
+func resumeWork(ctx *gtm.OpCtxMulti, session *mgo.Session, config *types.ConfigOptions) {
 	col := session.DB("monstache").C("monstache")
 	doc := make(map[string]interface{})
 	col.FindId(config.ResumeName).One(doc)
@@ -457,7 +393,7 @@ func resumeWork(ctx *gtm.OpCtxMulti, session *mgo.Session, config *ConfigOptions
 	ctx.Resume()
 }
 
-func saveTimestamp(s *mgo.Session, ts bson.MongoTimestamp, config *ConfigOptions) error {
+func saveTimestamp(s *mgo.Session, ts bson.MongoTimestamp, config *types.ConfigOptions) error {
 	session := s.Copy()
 	session.SetSocketTimeout(time.Duration(5) * time.Second)
 	session.SetSyncTimeout(time.Duration(5) * time.Second)
@@ -472,139 +408,9 @@ func saveTimestamp(s *mgo.Session, ts bson.MongoTimestamp, config *ConfigOptions
 	return err
 }
 
-func (config *ConfigOptions) parseCommandLineFlags() *ConfigOptions {
-	flag.BoolVar(&config.Print, "print-config", false, "Print the configuration and then exit")
-	flag.StringVar(&config.MongoURL, "mongo-url", "", "MongoDB server or router server connection URL")
-	flag.StringVar(&config.MongoConfigURL, "mongo-config-url", "", "MongoDB config server connection URL")
-	flag.StringVar(&config.MongoPemFile, "mongo-pem-file", "", "Path to a PEM file for secure connections to MongoDB")
-	flag.BoolVar(&config.MongoValidatePemFile, "mongo-validate-pem-file", true, "Set to boolean false to not validate the MongoDB PEM file")
-	flag.StringVar(&config.MongoOpLogDatabaseName, "mongo-oplog-database-name", "", "Override the database name which contains the mongodb oplog")
-	flag.StringVar(&config.MongoOpLogCollectionName, "mongo-oplog-collection-name", "", "Override the collection name which contains the mongodb oplog")
-	flag.StringVar(&config.MongoCursorTimeout, "mongo-cursor-timeout", "", "Override the duration before a cursor timeout occurs when tailing the oplog")
-	flag.StringVar(&config.ElasticVersion, "elasticsearch-version", "", "Specify elasticsearch version directly instead of getting it from the server")
-	flag.StringVar(&config.ElasticUser, "elasticsearch-user", "", "The elasticsearch user name for basic auth")
-	flag.StringVar(&config.ElasticPassword, "elasticsearch-password", "", "The elasticsearch password for basic auth")
-	flag.StringVar(&config.ElasticPemFile, "elasticsearch-pem-file", "", "Path to a PEM file for secure connections to elasticsearch")
-	flag.BoolVar(&config.ElasticValidatePemFile, "elasticsearch-validate-pem-file", true, "Set to boolean false to not validate the Elasticsearch PEM file")
-	flag.IntVar(&config.ElasticMaxConns, "elasticsearch-max-conns", 0, "Elasticsearch max connections")
-	flag.BoolVar(&config.ElasticRetry, "elasticsearch-retry", false, "True to retry failed request to Elasticsearch")
-	flag.IntVar(&config.ElasticMaxDocs, "elasticsearch-max-docs", 0, "Number of docs to hold before flushing to Elasticsearch")
-	flag.IntVar(&config.ElasticMaxBytes, "elasticsearch-max-bytes", 0, "Number of bytes to hold before flushing to Elasticsearch")
-	flag.IntVar(&config.ElasticMaxSeconds, "elasticsearch-max-seconds", 0, "Number of seconds before flushing to Elasticsearch")
-	flag.IntVar(&config.ElasticClientTimeout, "elasticsearch-client-timeout", 0, "Number of seconds before a request to Elasticsearch is timed out")
-	flag.Int64Var(&config.MaxFileSize, "max-file-size", 0, "GridFs file content exceeding this limit in bytes will not be indexed in Elasticsearch")
-	flag.StringVar(&config.ConfigFile, "f", "", "Location of configuration file")
-	flag.BoolVar(&config.DroppedDatabases, "dropped-databases", true, "True to delete indexes from dropped databases")
-	flag.BoolVar(&config.DroppedCollections, "dropped-collections", true, "True to delete indexes from dropped collections")
-	flag.BoolVar(&config.Version, "v", false, "True to print the version number")
-	flag.BoolVar(&config.Gzip, "gzip", false, "True to use gzip for requests to elasticsearch")
-	flag.BoolVar(&config.Verbose, "verbose", false, "True to output verbose messages")
-	flag.BoolVar(&config.Stats, "stats", false, "True to print out statistics")
-	flag.BoolVar(&config.IndexStats, "index-stats", false, "True to index stats in elasticsearch")
-	flag.StringVar(&config.StatsDuration, "stats-duration", "", "The duration after which stats are logged")
-	flag.StringVar(&config.StatsIndexFormat, "stats-index-format", "", "time.Time supported format to use for the stats index names")
-	flag.BoolVar(&config.Resume, "resume", false, "True to capture the last timestamp of this run and resume on a subsequent run")
-	flag.Int64Var(&config.ResumeFromTimestamp, "resume-from-timestamp", 0, "Timestamp to resume syncing from")
-	flag.BoolVar(&config.ResumeWriteUnsafe, "resume-write-unsafe", false, "True to speedup writes of the last timestamp synched for resuming at the cost of error checking")
-	flag.BoolVar(&config.Replay, "replay", false, "True to replay all events from the oplog and index them in elasticsearch")
-	flag.BoolVar(&config.IndexFiles, "index-files", false, "True to index gridfs files into elasticsearch. Requires the elasticsearch mapper-attachments (deprecated) or ingest-attachment plugin")
-	flag.BoolVar(&config.FileHighlighting, "file-highlighting", false, "True to enable the ability to highlight search times for a file query")
-	flag.BoolVar(&config.EnablePatches, "enable-patches", false, "True to include an json-patch field on updates")
-	flag.BoolVar(&config.FailFast, "fail-fast", false, "True to exit if a single _bulk request fails")
-	flag.BoolVar(&config.IndexOplogTime, "index-oplog-time", false, "True to add date/time information from the oplog to each document when indexing")
-	flag.BoolVar(&config.ExitAfterDirectReads, "exit-after-direct-reads", false, "True to exit the program after reading directly from the configured namespaces")
-	flag.IntVar(&config.DirectReadLimit, "direct-read-limit", 0, "Maximum number of documents to fetch in each direct read query")
-	flag.IntVar(&config.DirectReadBatchSize, "direct-read-batch-size", 0, "The batch size to set on direct read queries")
-	flag.IntVar(&config.DirectReadersPerCol, "direct-readers-per-col", 0, "Number of goroutines directly reading a single collection")
-	flag.StringVar(&config.MergePatchAttr, "merge-patch-attribute", "", "Attribute to store json-patch values under")
-	flag.StringVar(&config.ResumeName, "resume-name", "", "Name under which to load/store the resume state. Defaults to 'default'")
-	flag.StringVar(&config.ClusterName, "cluster-name", "", "Name of the monstache process cluster")
-	flag.StringVar(&config.Worker, "worker", "", "The name of this worker in a multi-worker configuration")
-	flag.StringVar(&config.MapperPluginPath, "mapper-plugin-path", "", "The path to a .so file to load as a document mapper plugin")
-	flag.StringVar(&config.NsRegex, "namespace-regex", "", "A regex which is matched against an operation's namespace (<database>.<collection>).  Only operations which match are synched to elasticsearch")
-	flag.StringVar(&config.NsExcludeRegex, "namespace-exclude-regex", "", "A regex which is matched against an operation's namespace (<database>.<collection>).  Only operations which do not match are synched to elasticsearch")
-	flag.Var(&config.DirectReadNs, "direct-read-namespace", "A list of direct read namespaces")
-	flag.Var(&config.ElasticUrls, "elasticsearch-url", "A list of Elasticsearch URLs")
-	flag.Var(&config.FileNamespaces, "file-namespace", "A list of file namespaces")
-	flag.Var(&config.PatchNamespaces, "patch-namespace", "A list of patch namespaces")
-	flag.Var(&config.Workers, "workers", "A list of worker names")
-	flag.BoolVar(&config.EnableHTTPServer, "enable-http-server", false, "True to enable an internal http server")
-	flag.StringVar(&config.HTTPServerAddr, "http-server-addr", "", "The address the internal http server listens on")
-	flag.Parse()
-	return config
-}
-
-func (config *ConfigOptions) loadIndexTypes() {
-	if config.Mapping != nil {
-		mapIndexTypes = make(map[string]*types.IndexTypeMapping)
-		for _, m := range config.Mapping {
-			if m.Namespace != "" && m.Index != "" && m.Type != "" {
-				mapIndexTypes[m.Namespace] = &types.IndexTypeMapping{
-					Namespace: m.Namespace,
-					Index:     normalizeIndexName(m.Index),
-					Type:      normalizeTypeName(m.Type),
-				}
-			} else {
-				panic("Mappings must specify namespace, index, and type attributes")
-			}
-		}
-	}
-}
-
-func (config *ConfigOptions) loadScripts() {
-	if config.Script != nil {
-		mapEnvs = make(map[string]*executionEnv)
-		for _, s := range config.Script {
-			if s.Namespace != "" && s.Script != "" {
-				env := &executionEnv{
-					VM:      otto.New(),
-					Script:  s.Script,
-					Routing: s.Routing,
-				}
-				if err := env.VM.Set("module", make(map[string]interface{})); err != nil {
-					panic(err)
-				}
-				if _, err := env.VM.Run(env.Script); err != nil {
-					panic(err)
-				}
-				val, err := env.VM.Run("module.exports")
-				if err != nil {
-					panic(err)
-				} else if !val.IsFunction() {
-					panic("module.exports must be a function")
-
-				}
-				mapEnvs[s.Namespace] = env
-			} else {
-				panic("Scripts must specify namespace and script attributes")
-			}
-		}
-	}
-}
-
-func (config *ConfigOptions) loadPlugins() *ConfigOptions {
-	if config.MapperPluginPath != "" {
-		p, err := plugin.Open(config.MapperPluginPath)
-		if err != nil {
-			errorLog.Panicf("Unable to load mapper plugin %s: %s", config.MapperPluginPath, err)
-		}
-		mapper, err := p.Lookup("Map")
-		if err != nil {
-			errorLog.Panicf("Unable to find symbol 'Map' in mapper plugin: %s", err)
-		}
-		switch mapper.(type) {
-		case func(*monstachemap.MapperPluginInput) (*monstachemap.MapperPluginOutput, error):
-			mapperPlugin = mapper.(func(*monstachemap.MapperPluginInput) (*monstachemap.MapperPluginOutput, error))
-		default:
-			errorLog.Panicf("Plugin 'Map' function must be typed %T", mapperPlugin)
-		}
-	}
-	return config
-}
-
-func (config *ConfigOptions) loadConfigFile() *ConfigOptions {
+func (config *types.ConfigOptions) loadConfigFile() *types.ConfigOptions {
 	if config.ConfigFile != "" {
-		var tomlConfig = ConfigOptions{
+		var tomlConfig = types.ConfigOptions{
 			DroppedDatabases:     true,
 			DroppedCollections:   true,
 			MongoDialSettings:    mongoDialSettings{Timeout: -1},
@@ -793,7 +599,7 @@ func (config *ConfigOptions) loadConfigFile() *ConfigOptions {
 	return config
 }
 
-func (config *ConfigOptions) newLogger(path string) *lumberjack.Logger {
+func (config *types.ConfigOptions) newLogger(path string) *lumberjack.Logger {
 	return &lumberjack.Logger{
 		Filename:   path,
 		MaxSize:    500, // megabytes
@@ -802,7 +608,7 @@ func (config *ConfigOptions) newLogger(path string) *lumberjack.Logger {
 	}
 }
 
-func (config *ConfigOptions) setupLogging() {
+func (config *types.ConfigOptions) setupLogging() {
 	logs := config.Logs
 	if logs.Info != "" {
 		infoLog.SetOutput(config.newLogger(logs.Info))
@@ -818,7 +624,7 @@ func (config *ConfigOptions) setupLogging() {
 	}
 }
 
-func (config *ConfigOptions) LoadPatchNamespaces() *ConfigOptions {
+func (config *types.ConfigOptions) LoadPatchNamespaces() *types.ConfigOptions {
 	patchNamespaces = make(map[string]bool)
 	for _, namespace := range config.PatchNamespaces {
 		patchNamespaces[namespace] = true
@@ -826,7 +632,7 @@ func (config *ConfigOptions) LoadPatchNamespaces() *ConfigOptions {
 	return config
 }
 
-func (config *ConfigOptions) LoadGridFsConfig() *ConfigOptions {
+func (config *types.ConfigOptions) LoadGridFsConfig() *types.ConfigOptions {
 	fileNamespaces = make(map[string]bool)
 	for _, namespace := range config.FileNamespaces {
 		fileNamespaces[namespace] = true
@@ -834,7 +640,7 @@ func (config *ConfigOptions) LoadGridFsConfig() *ConfigOptions {
 	return config
 }
 
-func (config *ConfigOptions) dump() {
+func (config *types.ConfigOptions) dump() {
 	json, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		errorLog.Printf("Unable to print configuration: %s", err)
@@ -843,7 +649,7 @@ func (config *ConfigOptions) dump() {
 	}
 }
 
-func doDrop(mongo *mgo.Session, elastic *elastic.Client, op *gtm.Op, config *ConfigOptions) (err error) {
+func doDrop(mongo *mgo.Session, elastic *elastic.Client, op *gtm.Op, config *types.ConfigOptions) (err error) {
 	if db, drop := op.IsDropDatabase(); drop {
 		if config.DroppedDatabases {
 			if err = deleteIndexes(elastic, db, config); err == nil {
@@ -864,7 +670,7 @@ func doDrop(mongo *mgo.Session, elastic *elastic.Client, op *gtm.Op, config *Con
 	return
 }
 
-func doFileContent(mongo *mgo.Session, op *gtm.Op, config *ConfigOptions) (ingestAttachment bool, err error) {
+func doFileContent(mongo *mgo.Session, op *gtm.Op, config *types.ConfigOptions) (ingestAttachment bool, err error) {
 	if !config.IndexFiles {
 		return
 	}
@@ -879,8 +685,8 @@ func doFileContent(mongo *mgo.Session, op *gtm.Op, config *ConfigOptions) (inges
 	return
 }
 
-func addPatch(config *ConfigOptions, client *elastic.Client, op *gtm.Op,
-	objectID string, indexType *types.IndexTypeMapping, meta *indexingMeta) (err error) {
+func addPatch(config *types.ConfigOptions, client *elastic.Client, op *gtm.Op,
+	objectID string, indexType *types.IndexTypeMapping, meta *types.IndexingMeta) (err error) {
 	var merges []interface{}
 	var toJSON []byte
 	if op.IsSourceDirect() {
@@ -955,7 +761,7 @@ func addPatch(config *ConfigOptions, client *elastic.Client, op *gtm.Op,
 	return
 }
 
-func doIndexing(config *ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
+func doIndexing(config *types.ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
 	meta := parseIndexMeta(op)
 	prepareDataForIndexing(config, op)
 	objectID, indexType := opIDToString(op), mapIndexType(op)
@@ -1013,7 +819,7 @@ func doIndexing(config *ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkPro
 	return
 }
 
-func doIndex(config *ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
+func doIndex(config *types.ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
 	if err = mapData(mongo, config, op); err == nil {
 		if op.Data != nil {
 			err = doIndexing(config, mongo, bulk, client, op, ingestAttachment)
@@ -1024,7 +830,7 @@ func doIndex(config *ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkProces
 	return
 }
 
-func doIndexStats(config *ConfigOptions, bulkStats *elastic.BulkProcessor, stats elastic.BulkProcessorStats) (err error) {
+func doIndexStats(config *types.ConfigOptions, bulkStats *elastic.BulkProcessor, stats elastic.BulkProcessorStats) (err error) {
 	var hostname string
 	doc := make(map[string]interface{})
 	t := time.Now().UTC()
@@ -1056,54 +862,7 @@ func dropCollectionMeta(session *mgo.Session, namespace string) (err error) {
 	return
 }
 
-func (meta *indexingMeta) load(metaAttrs map[string]interface{}) {
-	var v interface{}
-	var ok bool
-	var s string
-	if v, ok = metaAttrs["routing"]; ok {
-		meta.Routing = fmt.Sprintf("%v", v)
-	}
-	if v, ok = metaAttrs["index"]; ok {
-		meta.Index = fmt.Sprintf("%v", v)
-	}
-	if v, ok = metaAttrs["type"]; ok {
-		meta.Type = fmt.Sprintf("%v", v)
-	}
-	if v, ok = metaAttrs["parent"]; ok {
-		meta.Parent = fmt.Sprintf("%v", v)
-	}
-	if v, ok = metaAttrs["version"]; ok {
-		s = fmt.Sprintf("%v", v)
-		if version, err := strconv.ParseInt(s, 10, 64); err == nil {
-			meta.Version = version
-		}
-	}
-	if v, ok = metaAttrs["versionType"]; ok {
-		meta.VersionType = fmt.Sprintf("%v", v)
-	}
-	if v, ok = metaAttrs["ttl"]; ok {
-		meta.TTL = fmt.Sprintf("%v", v)
-	}
-	if v, ok = metaAttrs["pipeline"]; ok {
-		meta.Pipeline = fmt.Sprintf("%v", v)
-	}
-	if v, ok = metaAttrs["retryOnConflict"]; ok {
-		s = fmt.Sprintf("%v", v)
-		if roc, err := strconv.Atoi(s); err == nil {
-			meta.RetryOnConflict = roc
-		}
-	}
-}
-
-func (meta *indexingMeta) shouldSave() bool {
-	return (meta.Routing != "" ||
-		meta.Index != "" ||
-		meta.Type != "" ||
-		meta.Parent != "" ||
-		meta.Pipeline != "")
-}
-
-func setIndexMeta(session *mgo.Session, namespace, id string, meta *indexingMeta) error {
+func setIndexMeta(session *mgo.Session, namespace, id string, meta *types.IndexingMeta) error {
 	col := session.DB("monstache").C("meta")
 	metaID := fmt.Sprintf("%s.%s", namespace, id)
 	doc := make(map[string]interface{})
@@ -1118,7 +877,7 @@ func setIndexMeta(session *mgo.Session, namespace, id string, meta *indexingMeta
 	return err
 }
 
-func getIndexMeta(session *mgo.Session, namespace, id string) (meta *indexingMeta) {
+func getIndexMeta(session *mgo.Session, namespace, id string) (meta *types.IndexingMeta) {
 	meta = &indexingMeta{}
 	col := session.DB("monstache").C("meta")
 	doc := make(map[string]interface{})
@@ -1179,189 +938,6 @@ func loadBuiltinFunctions(s *mgo.Session) {
 			panic(err)
 		}
 	}
-}
-
-func (fc *findCall) setDatabase(topts map[string]interface{}) (err error) {
-	if ov, ok := topts["database"]; ok {
-		if ovs, ok := ov.(string); ok {
-			fc.db = ovs
-		} else {
-			err = errors.New("Invalid database option value")
-		}
-	}
-	return
-}
-
-func (fc *findCall) setCollection(topts map[string]interface{}) (err error) {
-	if ov, ok := topts["collection"]; ok {
-		if ovs, ok := ov.(string); ok {
-			fc.col = ovs
-		} else {
-			err = errors.New("Invalid collection option value")
-		}
-	}
-	return
-}
-
-func (fc *findCall) setSelect(topts map[string]interface{}) (err error) {
-	if ov, ok := topts["select"]; ok {
-		if ovsel, ok := ov.(map[string]interface{}); ok {
-			for k, v := range ovsel {
-				if vi, ok := v.(int64); ok {
-					fc.sel[k] = int(vi)
-				}
-			}
-		} else {
-			err = errors.New("Invalid select option value")
-		}
-	}
-	return
-}
-
-func (fc *findCall) setSort(topts map[string]interface{}) (err error) {
-	if ov, ok := topts["sort"]; ok {
-		if ovs, ok := ov.([]string); ok {
-			fc.sort = ovs
-		} else {
-			err = errors.New("Invalid sort option value")
-		}
-	}
-	return
-}
-
-func (fc *findCall) setLimit(topts map[string]interface{}) (err error) {
-	if ov, ok := topts["limit"]; ok {
-		if ovl, ok := ov.(int64); ok {
-			fc.limit = int(ovl)
-		} else {
-			err = errors.New("Invalid limit option value")
-		}
-	}
-	return
-}
-
-func (fc *findCall) setQuery(v otto.Value) (err error) {
-	var q interface{}
-	if q, err = v.Export(); err == nil {
-		fc.query = fc.restoreIds(q)
-	}
-	return
-}
-
-func (fc *findCall) setOptions(v otto.Value) (err error) {
-	var opts interface{}
-	if opts, err = v.Export(); err == nil {
-		switch topts := opts.(type) {
-		case map[string]interface{}:
-			if err = fc.setDatabase(topts); err != nil {
-				return
-			}
-			if err = fc.setCollection(topts); err != nil {
-				return
-			}
-			if err = fc.setSelect(topts); err != nil {
-				return
-			}
-			if fc.isMulti() {
-				if err = fc.setSort(topts); err != nil {
-					return
-				}
-				if err = fc.setLimit(topts); err != nil {
-					return
-				}
-			}
-		default:
-			err = errors.New("Invalid options argument")
-			return
-		}
-	} else {
-		err = errors.New("Invalid options argument")
-	}
-	return
-}
-
-func (fc *findCall) setDefaults() {
-	ns := strings.Split(fc.config.ns, ".")
-	fc.db = ns[0]
-	fc.col = ns[1]
-}
-
-func (fc *findCall) getCollection() *mgo.Collection {
-	return fc.session.DB(fc.db).C(fc.col)
-}
-
-func (fc *findCall) getVM() *otto.Otto {
-	return fc.config.vm
-}
-
-func (fc *findCall) getFunctionName() string {
-	return fc.config.name
-}
-
-func (fc *findCall) isMulti() bool {
-	return fc.config.multi
-}
-
-func (fc *findCall) logError(err error) {
-	errorLog.Printf("Error in function %s: %s\n", fc.getFunctionName(), err)
-}
-
-func (fc *findCall) restoreIds(v interface{}) (r interface{}) {
-	switch vt := v.(type) {
-	case string:
-		if bson.IsObjectIdHex(vt) {
-			r = bson.ObjectIdHex(vt)
-		} else {
-			r = v
-		}
-	case []interface{}:
-		var avs []interface{}
-		for _, av := range vt {
-			avs = append(avs, fc.restoreIds(av))
-		}
-		r = avs
-	case map[string]interface{}:
-		mvs := make(map[string]interface{})
-		for k, v := range vt {
-			mvs[k] = fc.restoreIds(v)
-		}
-		r = mvs
-	default:
-		r = v
-	}
-	return
-}
-
-func (fc *findCall) execute() (r otto.Value, err error) {
-	col := fc.getCollection()
-	if fc.isMulti() {
-		var docs []map[string]interface{}
-		mq := col.Find(fc.query)
-		if fc.limit > 0 {
-			mq.Limit(fc.limit)
-		}
-		if len(fc.sort) > 0 {
-			mq.Sort(fc.sort...)
-		}
-		if len(fc.sel) > 0 {
-			mq.Select(fc.sel)
-		}
-		if err = mq.All(&docs); err == nil {
-			r, err = fc.getVM().ToValue(docs)
-		}
-	} else {
-		doc := make(map[string]interface{})
-		if fc.config.byId {
-			if err = col.FindId(fc.query).One(doc); err == nil {
-				r, err = fc.getVM().ToValue(doc)
-			}
-		} else {
-			if err = col.Find(fc.query).One(doc); err == nil {
-				r, err = fc.getVM().ToValue(doc)
-			}
-		}
-	}
-	return
 }
 
 func makeFind(fa *findConf) func(otto.FunctionCall) otto.Value {
@@ -1430,14 +1006,6 @@ func doDelete(mongo *mgo.Session, bulk *elastic.BulkProcessor, op *gtm.Op) {
 	return
 }
 
-func gtmDefaultSettings() gtmSettings {
-	return gtmSettings{
-		ChannelSize:    gtmChannelSizeDefault,
-		BufferSize:     32,
-		BufferDuration: "750ms",
-	}
-}
-
 func (ctx *httpServerCtx) serveHttp() {
 	s := ctx.httpServer
 	if ctx.config.Verbose {
@@ -1493,7 +1061,7 @@ func (ctx *httpServerCtx) buildServer() {
 	ctx.httpServer = s
 }
 
-func notifySd(config *ConfigOptions) {
+func notifySd(config *types.ConfigOptions) {
 	var interval time.Duration
 	if config.Verbose {
 		infoLog.Println("Sending systemd READY=1")
@@ -1529,23 +1097,9 @@ func notifySd(config *ConfigOptions) {
 	}
 }
 
-func (config *ConfigOptions) makeShardInsertHandler() gtm.ShardInsertHandler {
-	return func(shardInfo *gtm.ShardInfo) (*mgo.Session, error) {
-		infoLog.Printf("Adding shard found at %s\n", shardInfo.GetURL())
-		shardURL := config.getAuthURL(shardInfo.GetURL())
-		shard, err := config.dialMongo(shardURL)
-		if err == nil {
-			config.configureMongo(shard)
-			return shard, nil
-		} else {
-			return nil, err
-		}
-	}
-}
-
 func main() {
 	enabled := true
-	config := &ConfigOptions{
+	config := &types.ConfigOptions{
 		MongoDialSettings:    mongoDialSettings{Timeout: -1},
 		MongoSessionSettings: mongoSessionSettings{SocketTimeout: -1, SyncTimeout: -1},
 		GtmSettings:          gtmDefaultSettings(),
@@ -1783,7 +1337,7 @@ func main() {
 	}
 	exitStatus := 0
 	if len(config.DirectReadNs) > 0 {
-		go func(c *gtm.OpCtxMulti, config *ConfigOptions) {
+		go func(c *gtm.OpCtxMulti, config *types.ConfigOptions) {
 			c.DirectReadWg.Wait()
 			if config.ExitAfterDirectReads {
 				done <- true
