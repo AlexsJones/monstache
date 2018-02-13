@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -41,10 +40,6 @@ import (
 )
 
 var gridByteBuffer bytes.Buffer
-var infoLog = log.New(os.Stdout, "INFO ", log.Flags())
-var statsLog = log.New(os.Stdout, "STATS ", log.Flags())
-var traceLog = log.New(os.Stdout, "TRACE ", log.Flags())
-var errorLog = log.New(os.Stderr, "ERROR ", log.Flags())
 
 var mapperPlugin func(*monstachemap.MapperPluginInput) (*monstachemap.MapperPluginOutput, error)
 var mapEnvs map[string]*executionEnv
@@ -66,135 +61,9 @@ const gtmChannelSizeDefault int = 512
 type httpServerCtx struct {
 	httpServer *http.Server
 	bulk       *elastic.BulkProcessor
-	config     *types.configOptions
+	config     *types.ConfigOptions
 	shutdown   bool
 	started    time.Time
-}
-
-func (config *configOptions) isSharded() bool {
-	return config.MongoConfigURL != ""
-}
-
-func afterBulk(executionId int64, requests []elastic.BulkableRequest, response *elastic.BulkResponse, err error) {
-	if err != nil {
-		errorLog.Printf("Bulk index request with execution ID %d failed: %s", executionId, err)
-	}
-	if response != nil && response.Errors {
-		failed := response.Failed()
-		if failed != nil {
-			errorLog.Printf("Bulk index request with execution ID %d has %d line failure(s)", executionId, len(failed))
-			for i, item := range failed {
-				json, err := json.Marshal(item)
-				if err != nil {
-					errorLog.Printf("Unable to marshall failed request line #%d: %s", i, err)
-				} else {
-					errorLog.Printf("Failed request line #%d details: %s", i, string(json))
-				}
-			}
-		}
-	}
-}
-
-func (config *configOptions) parseElasticsearchVersion(number string) (err error) {
-	if number == "" {
-		err = errors.New("Elasticsearch version cannot be blank")
-	} else {
-		versionParts := strings.Split(number, ".")
-		var majorVersion int
-		majorVersion, err = strconv.Atoi(versionParts[0])
-		if err == nil {
-			config.ElasticMajorVersion = majorVersion
-			if majorVersion == 0 {
-				err = errors.New("Invalid Elasticsearch major version 0")
-			}
-		}
-	}
-	return
-}
-
-func (config *configOptions) newBulkProcessor(client *elastic.Client) (bulk *elastic.BulkProcessor, err error) {
-	bulkService := client.BulkProcessor().Name("monstache")
-	bulkService.Workers(config.ElasticMaxConns)
-	bulkService.Stats(config.Stats)
-	if config.ElasticMaxDocs != 0 {
-		bulkService.BulkActions(config.ElasticMaxDocs)
-	}
-	if config.ElasticMaxBytes != 0 {
-		bulkService.BulkSize(config.ElasticMaxBytes)
-	}
-	if config.ElasticRetry == false {
-		bulkService.Backoff(&elastic.StopBackoff{})
-	}
-	bulkService.After(afterBulk)
-	bulkService.FlushInterval(time.Duration(config.ElasticMaxSeconds) * time.Second)
-	return bulkService.Do(context.Background())
-}
-
-func (config *configOptions) newStatsBulkProcessor(client *elastic.Client) (bulk *elastic.BulkProcessor, err error) {
-	bulkService := client.BulkProcessor().Name("monstache-stats")
-	bulkService.Workers(1)
-	bulkService.Stats(false)
-	bulkService.BulkActions(1)
-	bulkService.After(afterBulk)
-	return bulkService.Do(context.Background())
-}
-
-func (config *configOptions) needsSecureScheme() bool {
-	if len(config.ElasticUrls) > 0 {
-		for _, url := range config.ElasticUrls {
-			if strings.HasPrefix(url, "https") {
-				return true
-			}
-		}
-	}
-	return false
-
-}
-
-func (config *configOptions) newElasticClient() (client *elastic.Client, err error) {
-	var clientOptions []elastic.ClientOptionFunc
-	var httpClient *http.Client
-	clientOptions = append(clientOptions, elastic.SetErrorLog(errorLog))
-	clientOptions = append(clientOptions, elastic.SetSniff(false))
-	if config.needsSecureScheme() {
-		clientOptions = append(clientOptions, elastic.SetScheme("https"))
-	}
-	if len(config.ElasticUrls) > 0 {
-		clientOptions = append(clientOptions, elastic.SetURL(config.ElasticUrls...))
-	} else {
-		config.ElasticUrls = append(config.ElasticUrls, elastic.DefaultURL)
-	}
-	if config.Verbose {
-		clientOptions = append(clientOptions, elastic.SetTraceLog(traceLog))
-	}
-	if config.Gzip {
-		clientOptions = append(clientOptions, elastic.SetGzip(true))
-	}
-	if config.ElasticUser != "" {
-		clientOptions = append(clientOptions, elastic.SetBasicAuth(config.ElasticUser, config.ElasticPassword))
-	}
-	if config.ElasticRetry {
-		d1, d2 := time.Duration(50)*time.Millisecond, time.Duration(20)*time.Second
-		retrier := elastic.NewBackoffRetrier(elastic.NewExponentialBackoff(d1, d2))
-		clientOptions = append(clientOptions, elastic.SetRetrier(retrier))
-	}
-	httpClient, err = config.NewHTTPClient()
-	if err != nil {
-		return client, err
-	}
-	clientOptions = append(clientOptions, elastic.SetHttpClient(httpClient))
-	return elastic.NewClient(clientOptions...)
-}
-
-func (config *configOptions) testElasticsearchConn(client *elastic.Client) (err error) {
-	var number string
-	url := config.ElasticUrls[0]
-	number, err = client.ElasticsearchVersion(url)
-	if err == nil {
-		infoLog.Printf("Successfully connected to Elasticsearch version %s", number)
-		err = config.parseElasticsearchVersion(number)
-	}
-	return
 }
 
 func normalizeIndexName(name string) (normal string) {
@@ -210,92 +79,6 @@ func normalizeTypeName(name string) (normal string) {
 func normalizeEsID(id string) (normal string) {
 	normal = strings.TrimPrefix(id, "_")
 	return
-}
-
-func deleteIndexes(client *elastic.Client, db string, config *configOptions) (err error) {
-	ctx := context.Background()
-	for ns, m := range mapIndexTypes {
-		parts := strings.SplitN(ns, ".", 2)
-		if parts[0] == db {
-			if _, err = client.DeleteIndex(m.Index + "*").Do(ctx); err != nil {
-				return
-			}
-		}
-	}
-	_, err = client.DeleteIndex(normalizeIndexName(db) + "*").Do(ctx)
-	return
-}
-
-func deleteIndex(client *elastic.Client, namespace string, config *configOptions) (err error) {
-	ctx := context.Background()
-	esIndex := normalizeIndexName(namespace)
-	if m := mapIndexTypes[namespace]; m != nil {
-		esIndex = m.Index
-	}
-	_, err = client.DeleteIndex(esIndex).Do(ctx)
-	return err
-}
-
-func ensureFileMapping(client *elastic.Client, namespace string, config *configOptions) (err error) {
-	if config.ElasticMajorVersion < 5 {
-		return ensureFileMappingMapperAttachment(client, namespace, config)
-	}
-	return ensureFileMappingIngestAttachment(client, namespace, config)
-}
-
-func ensureFileMappingIngestAttachment(client *elastic.Client, namespace string, config *configOptions) (err error) {
-	ctx := context.Background()
-	pipeline := map[string]interface{}{
-		"description": "Extract file information",
-		"processors": [1]map[string]interface{}{
-			{
-				"attachment": map[string]interface{}{
-					"field": "file",
-				},
-			},
-		},
-	}
-	_, err = client.IngestPutPipeline("attachment").BodyJson(pipeline).Do(ctx)
-	return err
-}
-
-func ensureFileMappingMapperAttachment(conn *elastic.Client, namespace string, config *configOptions) (err error) {
-	ctx := context.Background()
-	parts := strings.SplitN(namespace, ".", 2)
-	esIndex, esType := normalizeIndexName(namespace), normalizeTypeName(parts[1])
-	if m := mapIndexTypes[namespace]; m != nil {
-		esIndex, esType = m.Index, m.Type
-	}
-	props := map[string]interface{}{
-		"properties": map[string]interface{}{
-			"file": map[string]interface{}{
-				"type": "attachment",
-			},
-		},
-	}
-	file := props["properties"].(map[string]interface{})["file"].(map[string]interface{})
-	types := map[string]interface{}{
-		esType: props,
-	}
-	mappings := map[string]interface{}{
-		"mappings": types,
-	}
-	if config.FileHighlighting {
-		file["fields"] = map[string]interface{}{
-			"content": map[string]interface{}{
-				"type":        "string",
-				"term_vector": "with_positions_offsets",
-				"store":       true,
-			},
-		}
-	}
-	var exists bool
-	if exists, err = conn.IndexExists(esIndex).Do(ctx); exists {
-		_, err = conn.PutMapping().Index(esIndex).Type(esType).BodyJson(types).Do(ctx)
-	} else {
-		_, err = conn.CreateIndex(esIndex).BodyJson(mappings).Do(ctx)
-	}
-	return err
 }
 
 func defaultIndexTypeMapping(op *gtm.Op) *indexTypeMapping {
@@ -502,14 +285,14 @@ func mapDataGolang(s *mgo.Session, op *gtm.Op) error {
 	return nil
 }
 
-func mapData(session *mgo.Session, config *configOptions, op *gtm.Op) error {
+func mapData(session *mgo.Session, config *ConfigOptions, op *gtm.Op) error {
 	if config.MapperPluginPath != "" {
 		return mapDataGolang(session, op)
 	}
 	return mapDataJavascript(op)
 }
 
-func prepareDataForIndexing(config *configOptions, op *gtm.Op) {
+func prepareDataForIndexing(config *ConfigOptions, op *gtm.Op) {
 	data := op.Data
 	if config.IndexOplogTime {
 		secs := int64(op.Timestamp >> 32)
@@ -553,7 +336,7 @@ func parseIndexMeta(op *gtm.Op) (meta *indexingMeta) {
 	return meta
 }
 
-func addFileContent(s *mgo.Session, op *gtm.Op, config *configOptions) (err error) {
+func addFileContent(s *mgo.Session, op *gtm.Op, config *ConfigOptions) (err error) {
 	session := s.Copy()
 	defer session.Close()
 	op.Data["file"] = ""
@@ -623,7 +406,7 @@ func ensureClusterTTL(session *mgo.Session) error {
 	})
 }
 
-func enableProcess(s *mgo.Session, config *configOptions) (bool, error) {
+func enableProcess(s *mgo.Session, config *ConfigOptions) (bool, error) {
 	session := s.Copy()
 	defer session.Close()
 	col := session.DB("monstache").C("cluster")
@@ -646,12 +429,12 @@ func enableProcess(s *mgo.Session, config *configOptions) (bool, error) {
 	return false, err
 }
 
-func resetClusterState(session *mgo.Session, config *configOptions) error {
+func resetClusterState(session *mgo.Session, config *ConfigOptions) error {
 	col := session.DB("monstache").C("cluster")
 	return col.RemoveId(config.ResumeName)
 }
 
-func ensureEnabled(s *mgo.Session, config *configOptions) (enabled bool, err error) {
+func ensureEnabled(s *mgo.Session, config *ConfigOptions) (enabled bool, err error) {
 	session := s.Copy()
 	defer session.Close()
 	col := session.DB("monstache").C("cluster")
@@ -673,7 +456,7 @@ func ensureEnabled(s *mgo.Session, config *configOptions) (enabled bool, err err
 	return
 }
 
-func resumeWork(ctx *gtm.OpCtxMulti, session *mgo.Session, config *configOptions) {
+func resumeWork(ctx *gtm.OpCtxMulti, session *mgo.Session, config *ConfigOptions) {
 	col := session.DB("monstache").C("monstache")
 	doc := make(map[string]interface{})
 	col.FindId(config.ResumeName).One(doc)
@@ -684,7 +467,7 @@ func resumeWork(ctx *gtm.OpCtxMulti, session *mgo.Session, config *configOptions
 	ctx.Resume()
 }
 
-func saveTimestamp(s *mgo.Session, ts bson.MongoTimestamp, config *configOptions) error {
+func saveTimestamp(s *mgo.Session, ts bson.MongoTimestamp, config *ConfigOptions) error {
 	session := s.Copy()
 	session.SetSocketTimeout(time.Duration(5) * time.Second)
 	session.SetSyncTimeout(time.Duration(5) * time.Second)
@@ -699,7 +482,7 @@ func saveTimestamp(s *mgo.Session, ts bson.MongoTimestamp, config *configOptions
 	return err
 }
 
-func (config *configOptions) parseCommandLineFlags() *configOptions {
+func (config *ConfigOptions) parseCommandLineFlags() *ConfigOptions {
 	flag.BoolVar(&config.Print, "print-config", false, "Print the configuration and then exit")
 	flag.StringVar(&config.MongoURL, "mongo-url", "", "MongoDB server or router server connection URL")
 	flag.StringVar(&config.MongoConfigURL, "mongo-config-url", "", "MongoDB config server connection URL")
@@ -761,7 +544,7 @@ func (config *configOptions) parseCommandLineFlags() *configOptions {
 	return config
 }
 
-func (config *configOptions) loadIndexTypes() {
+func (config *ConfigOptions) loadIndexTypes() {
 	if config.Mapping != nil {
 		mapIndexTypes = make(map[string]*indexTypeMapping)
 		for _, m := range config.Mapping {
@@ -778,7 +561,7 @@ func (config *configOptions) loadIndexTypes() {
 	}
 }
 
-func (config *configOptions) loadScripts() {
+func (config *ConfigOptions) loadScripts() {
 	if config.Script != nil {
 		mapEnvs = make(map[string]*executionEnv)
 		for _, s := range config.Script {
@@ -809,7 +592,7 @@ func (config *configOptions) loadScripts() {
 	}
 }
 
-func (config *configOptions) loadPlugins() *configOptions {
+func (config *ConfigOptions) loadPlugins() *ConfigOptions {
 	if config.MapperPluginPath != "" {
 		p, err := plugin.Open(config.MapperPluginPath)
 		if err != nil {
@@ -829,9 +612,9 @@ func (config *configOptions) loadPlugins() *configOptions {
 	return config
 }
 
-func (config *configOptions) loadConfigFile() *configOptions {
+func (config *ConfigOptions) loadConfigFile() *ConfigOptions {
 	if config.ConfigFile != "" {
-		var tomlConfig = configOptions{
+		var tomlConfig = ConfigOptions{
 			DroppedDatabases:     true,
 			DroppedCollections:   true,
 			MongoDialSettings:    mongoDialSettings{Timeout: -1},
@@ -1020,7 +803,7 @@ func (config *configOptions) loadConfigFile() *configOptions {
 	return config
 }
 
-func (config *configOptions) newLogger(path string) *lumberjack.Logger {
+func (config *ConfigOptions) newLogger(path string) *lumberjack.Logger {
 	return &lumberjack.Logger{
 		Filename:   path,
 		MaxSize:    500, // megabytes
@@ -1029,7 +812,7 @@ func (config *configOptions) newLogger(path string) *lumberjack.Logger {
 	}
 }
 
-func (config *configOptions) setupLogging() {
+func (config *ConfigOptions) setupLogging() {
 	logs := config.Logs
 	if logs.Info != "" {
 		infoLog.SetOutput(config.newLogger(logs.Info))
@@ -1045,7 +828,7 @@ func (config *configOptions) setupLogging() {
 	}
 }
 
-func (config *configOptions) LoadPatchNamespaces() *configOptions {
+func (config *ConfigOptions) LoadPatchNamespaces() *ConfigOptions {
 	patchNamespaces = make(map[string]bool)
 	for _, namespace := range config.PatchNamespaces {
 		patchNamespaces[namespace] = true
@@ -1053,7 +836,7 @@ func (config *configOptions) LoadPatchNamespaces() *configOptions {
 	return config
 }
 
-func (config *configOptions) LoadGridFsConfig() *configOptions {
+func (config *ConfigOptions) LoadGridFsConfig() *ConfigOptions {
 	fileNamespaces = make(map[string]bool)
 	for _, namespace := range config.FileNamespaces {
 		fileNamespaces[namespace] = true
@@ -1061,7 +844,7 @@ func (config *configOptions) LoadGridFsConfig() *configOptions {
 	return config
 }
 
-func (config *configOptions) dump() {
+func (config *ConfigOptions) dump() {
 	json, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		errorLog.Printf("Unable to print configuration: %s", err)
@@ -1075,7 +858,7 @@ if ssl=true is set on the connection string, remove the option
 from the connection string and enable TLS because the mgo
 driver does not support the option in the connection string
 */
-func (config *configOptions) parseMongoURL(inURL string) (outURL string) {
+func (config *ConfigOptions) parseMongoURL(inURL string) (outURL string) {
 	const queryDelim string = "?"
 	outURL = inURL
 	hostQuery := strings.SplitN(outURL, queryDelim, 2)
@@ -1095,7 +878,7 @@ func (config *configOptions) parseMongoURL(inURL string) (outURL string) {
 	return
 }
 
-func (config *configOptions) setDefaults() *configOptions {
+func (config *ConfigOptions) setDefaults() *ConfigOptions {
 	if config.MongoURL == "" {
 		config.MongoURL = mongoURLDefault
 	}
@@ -1143,7 +926,7 @@ func (config *configOptions) setDefaults() *configOptions {
 	return config
 }
 
-func (config *configOptions) getAuthURL(inURL string) string {
+func (config *ConfigOptions) getAuthURL(inURL string) string {
 	cred := strings.SplitN(config.MongoURL, "@", 2)
 	if len(cred) == 2 {
 		return cred[0] + "@" + inURL
@@ -1152,7 +935,7 @@ func (config *configOptions) getAuthURL(inURL string) string {
 	}
 }
 
-func (config *configOptions) configureMongo(session *mgo.Session) {
+func (config *ConfigOptions) configureMongo(session *mgo.Session) {
 	session.SetMode(mgo.Primary, true)
 	if config.MongoSessionSettings.SocketTimeout != -1 {
 		timeOut := time.Duration(config.MongoSessionSettings.SocketTimeout) * time.Second
@@ -1164,7 +947,7 @@ func (config *configOptions) configureMongo(session *mgo.Session) {
 	}
 }
 
-func (config *configOptions) dialMongo(inURL string) (*mgo.Session, error) {
+func (config *ConfigOptions) dialMongo(inURL string) (*mgo.Session, error) {
 	ssl := config.MongoDialSettings.Ssl || config.MongoPemFile != ""
 	if ssl {
 		tlsConfig := &tls.Config{}
@@ -1211,7 +994,7 @@ func (config *configOptions) dialMongo(inURL string) (*mgo.Session, error) {
 	return mgo.Dial(inURL)
 }
 
-func (config *configOptions) NewHTTPClient() (client *http.Client, err error) {
+func (config *ConfigOptions) NewHTTPClient() (client *http.Client, err error) {
 	tlsConfig := &tls.Config{}
 	if config.ElasticPemFile != "" {
 		var ca []byte
@@ -1238,7 +1021,7 @@ func (config *configOptions) NewHTTPClient() (client *http.Client, err error) {
 	return client, err
 }
 
-func doDrop(mongo *mgo.Session, elastic *elastic.Client, op *gtm.Op, config *configOptions) (err error) {
+func doDrop(mongo *mgo.Session, elastic *elastic.Client, op *gtm.Op, config *ConfigOptions) (err error) {
 	if db, drop := op.IsDropDatabase(); drop {
 		if config.DroppedDatabases {
 			if err = deleteIndexes(elastic, db, config); err == nil {
@@ -1259,7 +1042,7 @@ func doDrop(mongo *mgo.Session, elastic *elastic.Client, op *gtm.Op, config *con
 	return
 }
 
-func doFileContent(mongo *mgo.Session, op *gtm.Op, config *configOptions) (ingestAttachment bool, err error) {
+func doFileContent(mongo *mgo.Session, op *gtm.Op, config *ConfigOptions) (ingestAttachment bool, err error) {
 	if !config.IndexFiles {
 		return
 	}
@@ -1274,7 +1057,7 @@ func doFileContent(mongo *mgo.Session, op *gtm.Op, config *configOptions) (inges
 	return
 }
 
-func addPatch(config *configOptions, client *elastic.Client, op *gtm.Op,
+func addPatch(config *ConfigOptions, client *elastic.Client, op *gtm.Op,
 	objectID string, indexType *indexTypeMapping, meta *indexingMeta) (err error) {
 	var merges []interface{}
 	var toJSON []byte
@@ -1350,7 +1133,7 @@ func addPatch(config *configOptions, client *elastic.Client, op *gtm.Op,
 	return
 }
 
-func doIndexing(config *configOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
+func doIndexing(config *ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
 	meta := parseIndexMeta(op)
 	prepareDataForIndexing(config, op)
 	objectID, indexType := opIDToString(op), mapIndexType(op)
@@ -1408,7 +1191,7 @@ func doIndexing(config *configOptions, mongo *mgo.Session, bulk *elastic.BulkPro
 	return
 }
 
-func doIndex(config *configOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
+func doIndex(config *ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
 	if err = mapData(mongo, config, op); err == nil {
 		if op.Data != nil {
 			err = doIndexing(config, mongo, bulk, client, op, ingestAttachment)
@@ -1419,7 +1202,7 @@ func doIndex(config *configOptions, mongo *mgo.Session, bulk *elastic.BulkProces
 	return
 }
 
-func doIndexStats(config *configOptions, bulkStats *elastic.BulkProcessor, stats elastic.BulkProcessorStats) (err error) {
+func doIndexStats(config *ConfigOptions, bulkStats *elastic.BulkProcessor, stats elastic.BulkProcessorStats) (err error) {
 	var hostname string
 	doc := make(map[string]interface{})
 	t := time.Now().UTC()
@@ -1833,7 +1616,7 @@ func gtmDefaultSettings() gtmSettings {
 	}
 }
 
-func notifySdFailed(config *configOptions, err error) {
+func notifySdFailed(config *ConfigOptions, err error) {
 	if err != nil {
 		errorLog.Printf("Systemd notification failed: %s", err)
 	} else {
@@ -1843,7 +1626,7 @@ func notifySdFailed(config *configOptions, err error) {
 	}
 }
 
-func watchdogSdFailed(config *configOptions, err error) {
+func watchdogSdFailed(config *ConfigOptions, err error) {
 	if err != nil {
 		errorLog.Printf("Error determining systemd WATCHDOG interval: %s", err)
 	} else {
@@ -1908,7 +1691,7 @@ func (ctx *httpServerCtx) buildServer() {
 	ctx.httpServer = s
 }
 
-func notifySd(config *configOptions) {
+func notifySd(config *ConfigOptions) {
 	var interval time.Duration
 	if config.Verbose {
 		infoLog.Println("Sending systemd READY=1")
@@ -1944,7 +1727,7 @@ func notifySd(config *configOptions) {
 	}
 }
 
-func (config *configOptions) makeShardInsertHandler() gtm.ShardInsertHandler {
+func (config *ConfigOptions) makeShardInsertHandler() gtm.ShardInsertHandler {
 	return func(shardInfo *gtm.ShardInfo) (*mgo.Session, error) {
 		infoLog.Printf("Adding shard found at %s\n", shardInfo.GetURL())
 		shardURL := config.getAuthURL(shardInfo.GetURL())
@@ -1960,7 +1743,7 @@ func (config *configOptions) makeShardInsertHandler() gtm.ShardInsertHandler {
 
 func main() {
 	enabled := true
-	config := &configOptions{
+	config := &ConfigOptions{
 		MongoDialSettings:    mongoDialSettings{Timeout: -1},
 		MongoSessionSettings: mongoSessionSettings{SocketTimeout: -1, SyncTimeout: -1},
 		GtmSettings:          gtmDefaultSettings(),
@@ -2198,7 +1981,7 @@ func main() {
 	}
 	exitStatus := 0
 	if len(config.DirectReadNs) > 0 {
-		go func(c *gtm.OpCtxMulti, config *configOptions) {
+		go func(c *gtm.OpCtxMulti, config *ConfigOptions) {
 			c.DirectReadWg.Wait()
 			if config.ExitAfterDirectReads {
 				done <- true
