@@ -6,8 +6,11 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
+	"regexp"
 
 	"strconv"
 	"strings"
@@ -21,6 +24,13 @@ import (
 	elastic "gopkg.in/olivere/elastic.v5"
 )
 
+const mongoURLDefault string = "localhost"
+const resumeNameDefault string = "default"
+const elasticMaxConnsDefault int = 10
+const elasticClientTimeoutDefault int = 60
+const elasticMaxDocsDefault int = 1000
+const gtmChannelSizeDefault int = 512
+
 type executionEnv struct {
 	VM      *otto.Otto
 	Script  string
@@ -31,12 +41,6 @@ type javascript struct {
 	Namespace string
 	Script    string
 	Routing   bool
-}
-
-type indexTypeMapping struct {
-	Namespace string
-	Index     string
-	Type      string
 }
 
 type findConf struct {
@@ -57,18 +61,6 @@ type findCall struct {
 	limit   int
 	sort    []string
 	sel     map[string]int
-}
-
-type indexingMeta struct {
-	Routing         string
-	Index           string
-	Type            string
-	Parent          string
-	Version         int64
-	VersionType     string
-	TTL             string
-	Pipeline        string
-	RetryOnConflict int
 }
 
 type ConfigOptions struct {
@@ -124,7 +116,7 @@ type ConfigOptions struct {
 	MaxFileSize              int64 `toml:"max-file-size"`
 	ConfigFile               string
 	Script                   []javascript
-	Mapping                  []indexTypeMapping
+	Mapping                  []IndexTypeMapping
 	FileNamespaces           stringargs `toml:"file-namespaces"`
 	PatchNamespaces          stringargs `toml:"patch-namespaces"`
 	Workers                  stringargs
@@ -309,4 +301,145 @@ func watchdogSdFailed(config *ConfigOptions, err error) {
 			log.GetInstance().InfoLog.Println("Systemd WATCHDOG not enabled")
 		}
 	}
+}
+
+func (config *ConfigOptions) setDefaults() *ConfigOptions {
+	if config.MongoURL == "" {
+		config.MongoURL = mongoURLDefault
+	}
+	if config.ClusterName != "" {
+		if config.ClusterName != "" && config.Worker != "" {
+			config.ResumeName = fmt.Sprintf("%s:%s", config.ClusterName, config.Worker)
+		} else {
+			config.ResumeName = config.ClusterName
+		}
+		config.Resume = true
+	} else if config.ResumeName == "" {
+		if config.Worker != "" {
+			config.ResumeName = config.Worker
+		} else {
+			config.ResumeName = resumeNameDefault
+		}
+	}
+	if config.ElasticMaxConns == 0 {
+		config.ElasticMaxConns = elasticMaxConnsDefault
+	}
+	if config.ElasticClientTimeout == 0 {
+		config.ElasticClientTimeout = elasticClientTimeoutDefault
+	}
+	if config.MergePatchAttr == "" {
+		config.MergePatchAttr = "json-merge-patches"
+	}
+	if config.ElasticMaxSeconds == 0 {
+		config.ElasticMaxSeconds = 1
+	}
+	if config.ElasticMaxDocs == 0 {
+		config.ElasticMaxDocs = elasticMaxDocsDefault
+	}
+	if config.MongoURL != "" {
+		config.MongoURL = config.parseMongoURL(config.MongoURL)
+	}
+	if config.MongoConfigURL != "" {
+		config.MongoConfigURL = config.parseMongoURL(config.MongoConfigURL)
+	}
+	if config.HTTPServerAddr == "" {
+		config.HTTPServerAddr = ":8080"
+	}
+	if config.StatsIndexFormat == "" {
+		config.StatsIndexFormat = "monstache.stats.2006-01-02"
+	}
+	return config
+}
+
+func (config *ConfigOptions) getAuthURL(inURL string) string {
+	cred := strings.SplitN(config.MongoURL, "@", 2)
+	if len(cred) == 2 {
+		return cred[0] + "@" + inURL
+	} else {
+		return inURL
+	}
+}
+
+func (config *ConfigOptions) configureMongo(session *mgo.Session) {
+	session.SetMode(mgo.Primary, true)
+	if config.MongoSessionSettings.SocketTimeout != -1 {
+		timeOut := time.Duration(config.MongoSessionSettings.SocketTimeout) * time.Second
+		session.SetSocketTimeout(timeOut)
+	}
+	if config.MongoSessionSettings.SyncTimeout != -1 {
+		timeOut := time.Duration(config.MongoSessionSettings.SyncTimeout) * time.Second
+		session.SetSyncTimeout(timeOut)
+	}
+}
+
+func (config *ConfigOptions) dialMongo(inURL string) (*mgo.Session, error) {
+	ssl := config.MongoDialSettings.Ssl || config.MongoPemFile != ""
+	if ssl {
+		tlsConfig := &tls.Config{}
+		if config.MongoPemFile != "" {
+			certs := x509.NewCertPool()
+			if ca, err := ioutil.ReadFile(config.MongoPemFile); err == nil {
+				certs.AppendCertsFromPEM(ca)
+			} else {
+				return nil, err
+			}
+			tlsConfig.RootCAs = certs
+		}
+		// Check to see if we don't need to validate the PEM
+		if config.MongoValidatePemFile == false {
+			// Turn off validation
+			tlsConfig.InsecureSkipVerify = true
+		}
+		dialInfo, err := mgo.ParseURL(inURL)
+		if err != nil {
+			return nil, err
+		}
+		dialInfo.Timeout = time.Duration(10) * time.Second
+		if config.MongoDialSettings.Timeout != -1 {
+			dialInfo.Timeout = time.Duration(config.MongoDialSettings.Timeout) * time.Second
+		}
+		dialInfo.DialServer = func(addr *mgo.ServerAddr) (net.Conn, error) {
+			conn, err := tls.Dial("tcp", addr.String(), tlsConfig)
+			if err != nil {
+				log.GetInstance().ErrorLog.Printf("Unable to dial mongodb: %s", err)
+			}
+			return conn, err
+		}
+		session, err := mgo.DialWithInfo(dialInfo)
+		if err == nil {
+			session.SetSyncTimeout(1 * time.Minute)
+			session.SetSocketTimeout(1 * time.Minute)
+		}
+		return session, err
+	}
+	if config.MongoDialSettings.Timeout != -1 {
+		return mgo.DialWithTimeout(inURL,
+			time.Duration(config.MongoDialSettings.Timeout)*time.Second)
+	}
+	return mgo.Dial(inURL)
+}
+
+/*
+if ssl=true is set on the connection string, remove the option
+from the connection string and enable TLS because the mgo
+driver does not support the option in the connection string
+*/
+func (config *ConfigOptions) parseMongoURL(inURL string) (outURL string) {
+	const queryDelim string = "?"
+	outURL = inURL
+	hostQuery := strings.SplitN(outURL, queryDelim, 2)
+	if len(hostQuery) == 2 {
+		host, query := hostQuery[0], hostQuery[1]
+		r := regexp.MustCompile(`ssl=true&?|&ssl=true$`)
+		qstr := r.ReplaceAllString(query, "")
+		if qstr != query {
+			config.MongoDialSettings.Ssl = true
+			if qstr == "" {
+				outURL = host
+			} else {
+				outURL = strings.Join([]string{host, qstr}, queryDelim)
+			}
+		}
+	}
+	return
 }

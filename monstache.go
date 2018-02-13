@@ -3,16 +3,12 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -43,7 +39,7 @@ var gridByteBuffer bytes.Buffer
 
 var mapperPlugin func(*monstachemap.MapperPluginInput) (*monstachemap.MapperPluginOutput, error)
 var mapEnvs map[string]*executionEnv
-var mapIndexTypes map[string]*indexTypeMapping
+var mapIndexTypes map[string]*types.IndexTypeMapping
 var fileNamespaces map[string]bool
 var patchNamespaces map[string]bool
 
@@ -51,12 +47,6 @@ var chunksRegex = regexp.MustCompile("\\.chunks$")
 var systemsRegex = regexp.MustCompile("system\\..+$")
 
 const version = "3.6.1"
-const mongoURLDefault string = "localhost"
-const resumeNameDefault string = "default"
-const elasticMaxConnsDefault int = 10
-const elasticClientTimeoutDefault int = 60
-const elasticMaxDocsDefault int = 1000
-const gtmChannelSizeDefault int = 512
 
 type httpServerCtx struct {
 	httpServer *http.Server
@@ -81,16 +71,16 @@ func normalizeEsID(id string) (normal string) {
 	return
 }
 
-func defaultIndexTypeMapping(op *gtm.Op) *indexTypeMapping {
-	return &indexTypeMapping{
+func defaultIndexTypeMapping(op *gtm.Op) *types.IndexTypeMapping {
+	return &types.IndexTypeMapping{
 		Namespace: op.Namespace,
 		Index:     normalizeIndexName(op.Namespace),
 		Type:      normalizeTypeName(op.GetCollection()),
 	}
 }
 
-func mapIndexType(op *gtm.Op) *indexTypeMapping {
-	mapping := defaultIndexTypeMapping(op)
+func mapIndexType(op *gtm.Op) *types.IndexTypeMapping {
+	mapping := defaulttypes.IndexTypeMapping(op)
 	if mapIndexTypes != nil {
 		if m := mapIndexTypes[op.Namespace]; m != nil {
 			mapping = m
@@ -308,7 +298,7 @@ func prepareDataForIndexing(config *ConfigOptions, op *gtm.Op) {
 	delete(data, "_meta_monstache")
 }
 
-func parseIndexMeta(op *gtm.Op) (meta *indexingMeta) {
+func parseIndexMeta(op *gtm.Op) (meta *types.IndexingMeta) {
 	meta = &indexingMeta{
 		Version:     int64(op.Timestamp),
 		VersionType: "external",
@@ -546,10 +536,10 @@ func (config *ConfigOptions) parseCommandLineFlags() *ConfigOptions {
 
 func (config *ConfigOptions) loadIndexTypes() {
 	if config.Mapping != nil {
-		mapIndexTypes = make(map[string]*indexTypeMapping)
+		mapIndexTypes = make(map[string]*types.IndexTypeMapping)
 		for _, m := range config.Mapping {
 			if m.Namespace != "" && m.Index != "" && m.Type != "" {
-				mapIndexTypes[m.Namespace] = &indexTypeMapping{
+				mapIndexTypes[m.Namespace] = &types.IndexTypeMapping{
 					Namespace: m.Namespace,
 					Index:     normalizeIndexName(m.Index),
 					Type:      normalizeTypeName(m.Type),
@@ -853,174 +843,6 @@ func (config *ConfigOptions) dump() {
 	}
 }
 
-/*
-if ssl=true is set on the connection string, remove the option
-from the connection string and enable TLS because the mgo
-driver does not support the option in the connection string
-*/
-func (config *ConfigOptions) parseMongoURL(inURL string) (outURL string) {
-	const queryDelim string = "?"
-	outURL = inURL
-	hostQuery := strings.SplitN(outURL, queryDelim, 2)
-	if len(hostQuery) == 2 {
-		host, query := hostQuery[0], hostQuery[1]
-		r := regexp.MustCompile(`ssl=true&?|&ssl=true$`)
-		qstr := r.ReplaceAllString(query, "")
-		if qstr != query {
-			config.MongoDialSettings.Ssl = true
-			if qstr == "" {
-				outURL = host
-			} else {
-				outURL = strings.Join([]string{host, qstr}, queryDelim)
-			}
-		}
-	}
-	return
-}
-
-func (config *ConfigOptions) setDefaults() *ConfigOptions {
-	if config.MongoURL == "" {
-		config.MongoURL = mongoURLDefault
-	}
-	if config.ClusterName != "" {
-		if config.ClusterName != "" && config.Worker != "" {
-			config.ResumeName = fmt.Sprintf("%s:%s", config.ClusterName, config.Worker)
-		} else {
-			config.ResumeName = config.ClusterName
-		}
-		config.Resume = true
-	} else if config.ResumeName == "" {
-		if config.Worker != "" {
-			config.ResumeName = config.Worker
-		} else {
-			config.ResumeName = resumeNameDefault
-		}
-	}
-	if config.ElasticMaxConns == 0 {
-		config.ElasticMaxConns = elasticMaxConnsDefault
-	}
-	if config.ElasticClientTimeout == 0 {
-		config.ElasticClientTimeout = elasticClientTimeoutDefault
-	}
-	if config.MergePatchAttr == "" {
-		config.MergePatchAttr = "json-merge-patches"
-	}
-	if config.ElasticMaxSeconds == 0 {
-		config.ElasticMaxSeconds = 1
-	}
-	if config.ElasticMaxDocs == 0 {
-		config.ElasticMaxDocs = elasticMaxDocsDefault
-	}
-	if config.MongoURL != "" {
-		config.MongoURL = config.parseMongoURL(config.MongoURL)
-	}
-	if config.MongoConfigURL != "" {
-		config.MongoConfigURL = config.parseMongoURL(config.MongoConfigURL)
-	}
-	if config.HTTPServerAddr == "" {
-		config.HTTPServerAddr = ":8080"
-	}
-	if config.StatsIndexFormat == "" {
-		config.StatsIndexFormat = "monstache.stats.2006-01-02"
-	}
-	return config
-}
-
-func (config *ConfigOptions) getAuthURL(inURL string) string {
-	cred := strings.SplitN(config.MongoURL, "@", 2)
-	if len(cred) == 2 {
-		return cred[0] + "@" + inURL
-	} else {
-		return inURL
-	}
-}
-
-func (config *ConfigOptions) configureMongo(session *mgo.Session) {
-	session.SetMode(mgo.Primary, true)
-	if config.MongoSessionSettings.SocketTimeout != -1 {
-		timeOut := time.Duration(config.MongoSessionSettings.SocketTimeout) * time.Second
-		session.SetSocketTimeout(timeOut)
-	}
-	if config.MongoSessionSettings.SyncTimeout != -1 {
-		timeOut := time.Duration(config.MongoSessionSettings.SyncTimeout) * time.Second
-		session.SetSyncTimeout(timeOut)
-	}
-}
-
-func (config *ConfigOptions) dialMongo(inURL string) (*mgo.Session, error) {
-	ssl := config.MongoDialSettings.Ssl || config.MongoPemFile != ""
-	if ssl {
-		tlsConfig := &tls.Config{}
-		if config.MongoPemFile != "" {
-			certs := x509.NewCertPool()
-			if ca, err := ioutil.ReadFile(config.MongoPemFile); err == nil {
-				certs.AppendCertsFromPEM(ca)
-			} else {
-				return nil, err
-			}
-			tlsConfig.RootCAs = certs
-		}
-		// Check to see if we don't need to validate the PEM
-		if config.MongoValidatePemFile == false {
-			// Turn off validation
-			tlsConfig.InsecureSkipVerify = true
-		}
-		dialInfo, err := mgo.ParseURL(inURL)
-		if err != nil {
-			return nil, err
-		}
-		dialInfo.Timeout = time.Duration(10) * time.Second
-		if config.MongoDialSettings.Timeout != -1 {
-			dialInfo.Timeout = time.Duration(config.MongoDialSettings.Timeout) * time.Second
-		}
-		dialInfo.DialServer = func(addr *mgo.ServerAddr) (net.Conn, error) {
-			conn, err := tls.Dial("tcp", addr.String(), tlsConfig)
-			if err != nil {
-				errorLog.Printf("Unable to dial mongodb: %s", err)
-			}
-			return conn, err
-		}
-		session, err := mgo.DialWithInfo(dialInfo)
-		if err == nil {
-			session.SetSyncTimeout(1 * time.Minute)
-			session.SetSocketTimeout(1 * time.Minute)
-		}
-		return session, err
-	}
-	if config.MongoDialSettings.Timeout != -1 {
-		return mgo.DialWithTimeout(inURL,
-			time.Duration(config.MongoDialSettings.Timeout)*time.Second)
-	}
-	return mgo.Dial(inURL)
-}
-
-func (config *ConfigOptions) NewHTTPClient() (client *http.Client, err error) {
-	tlsConfig := &tls.Config{}
-	if config.ElasticPemFile != "" {
-		var ca []byte
-		certs := x509.NewCertPool()
-		if ca, err = ioutil.ReadFile(config.ElasticPemFile); err == nil {
-			certs.AppendCertsFromPEM(ca)
-			tlsConfig.RootCAs = certs
-		} else {
-			return client, err
-		}
-	}
-	if config.ElasticValidatePemFile == false {
-		// Turn off validation
-		tlsConfig.InsecureSkipVerify = true
-	}
-	transport := &http.Transport{
-		TLSHandshakeTimeout: time.Duration(30) * time.Second,
-		TLSClientConfig:     tlsConfig,
-	}
-	client = &http.Client{
-		Timeout:   time.Duration(config.ElasticClientTimeout) * time.Second,
-		Transport: transport,
-	}
-	return client, err
-}
-
 func doDrop(mongo *mgo.Session, elastic *elastic.Client, op *gtm.Op, config *ConfigOptions) (err error) {
 	if db, drop := op.IsDropDatabase(); drop {
 		if config.DroppedDatabases {
@@ -1058,7 +880,7 @@ func doFileContent(mongo *mgo.Session, op *gtm.Op, config *ConfigOptions) (inges
 }
 
 func addPatch(config *ConfigOptions, client *elastic.Client, op *gtm.Op,
-	objectID string, indexType *indexTypeMapping, meta *indexingMeta) (err error) {
+	objectID string, indexType *types.IndexTypeMapping, meta *indexingMeta) (err error) {
 	var merges []interface{}
 	var toJSON []byte
 	if op.IsSourceDirect() {
@@ -1613,26 +1435,6 @@ func gtmDefaultSettings() gtmSettings {
 		ChannelSize:    gtmChannelSizeDefault,
 		BufferSize:     32,
 		BufferDuration: "750ms",
-	}
-}
-
-func notifySdFailed(config *ConfigOptions, err error) {
-	if err != nil {
-		errorLog.Printf("Systemd notification failed: %s", err)
-	} else {
-		if config.Verbose {
-			infoLog.Println("Systemd notification not supported (i.e. NOTIFY_SOCKET is unset)")
-		}
-	}
-}
-
-func watchdogSdFailed(config *ConfigOptions, err error) {
-	if err != nil {
-		errorLog.Printf("Error determining systemd WATCHDOG interval: %s", err)
-	} else {
-		if config.Verbose {
-			infoLog.Println("Systemd WATCHDOG not enabled")
-		}
 	}
 }
 
