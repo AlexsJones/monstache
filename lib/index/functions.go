@@ -1,29 +1,11 @@
-package types
+package index
 
 import (
 	"fmt"
 	"strconv"
 )
 
-type IndexTypeMapping struct {
-	Namespace string
-	Index     string
-	Type      string
-}
-
-type IndexingMeta struct {
-	Routing         string
-	Index           string
-	Type            string
-	Parent          string
-	Version         int64
-	VersionType     string
-	TTL             string
-	Pipeline        string
-	RetryOnConflict int
-}
-
-func (meta *IndexingMeta) load(metaAttrs map[string]interface{}) {
+func (meta *IndexingMeta) Load(metaAttrs map[string]interface{}) {
 	var v interface{}
 	var ok bool
 	var s string

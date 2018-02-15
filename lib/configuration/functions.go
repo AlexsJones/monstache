@@ -1,4 +1,4 @@
-package types
+package configuration
 
 import (
 	"context"
@@ -13,112 +13,60 @@ import (
 	"net/http"
 	"plugin"
 	"regexp"
-
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/AlexsJones/monstache/lib/log"
+	"github.com/BurntSushi/toml"
 	"github.com/globalsign/mgo"
 	"github.com/robertkrimen/otto"
-	_ "github.com/robertkrimen/otto/underscore"
+	"github.com/rwynn/elastic"
 	"github.com/rwynn/monstache/monstachemap"
-
-	elastic "gopkg.in/olivere/elastic.v5"
+	lumberjack "gopkg.in/natefinch/lumberjack.v2"
 )
 
-const mongoURLDefault string = "localhost"
-const resumeNameDefault string = "default"
-const elasticMaxConnsDefault int = 10
-const elasticClientTimeoutDefault int = 60
-const elasticMaxDocsDefault int = 1000
-const gtmChannelSizeDefault int = 512
-
-var mapEnvs map[string]*executionEnv
-var mapperPlugin func(*monstachemap.MapperPluginInput) (*monstachemap.MapperPluginOutput, error)
-
-var mapIndexTypes map[string]*IndexTypeMapping
-
-type executionEnv struct {
-	VM      *otto.Otto
-	Script  string
-	Routing bool
+func (config *ConfigOptions) newLogger(path string) *lumberjack.Logger {
+	return &lumberjack.Logger{
+		Filename:   path,
+		MaxSize:    500, // megabytes
+		MaxBackups: 5,
+		MaxAge:     28, //days
+	}
 }
 
-type javascript struct {
-	Namespace string
-	Script    string
-	Routing   bool
+func (config *ConfigOptions) setupLogging() {
+	logs := config.Logs
+	if logs.Info != "" {
+		infoLog.SetOutput(config.newLogger(logs.Info))
+	}
+	if logs.Error != "" {
+		errorLog.SetOutput(config.newLogger(logs.Error))
+	}
+	if logs.Trace != "" {
+		traceLog.SetOutput(config.newLogger(logs.Trace))
+	}
+	if logs.Stats != "" {
+		statsLog.SetOutput(config.newLogger(logs.Stats))
+	}
 }
 
-type ConfigOptions struct {
-	MongoURL                 string               `toml:"mongo-url"`
-	MongoConfigURL           string               `toml:"mongo-config-url"`
-	MongoPemFile             string               `toml:"mongo-pem-file"`
-	MongoValidatePemFile     bool                 `toml:"mongo-validate-pem-file"`
-	MongoOpLogDatabaseName   string               `toml:"mongo-oplog-database-name"`
-	MongoOpLogCollectionName string               `toml:"mongo-oplog-collection-name"`
-	MongoCursorTimeout       string               `toml:"mongo-cursor-timeout"`
-	MongoDialSettings        mongoDialSettings    `toml:"mongo-dial-settings"`
-	MongoSessionSettings     mongoSessionSettings `toml:"mongo-session-settings"`
-	GtmSettings              gtmSettings          `toml:"gtm-settings"`
-	Logs                     logFiles             `toml:"logs"`
-	ElasticUrls              stringargs           `toml:"elasticsearch-urls"`
-	ElasticUser              string               `toml:"elasticsearch-user"`
-	ElasticPassword          string               `toml:"elasticsearch-password"`
-	ElasticPemFile           string               `toml:"elasticsearch-pem-file"`
-	ElasticValidatePemFile   bool                 `toml:"elasticsearch-validate-pem-file"`
-	ElasticVersion           string               `toml:"elasticsearch-version"`
-	ResumeName               string               `toml:"resume-name"`
-	NsRegex                  string               `toml:"namespace-regex"`
-	NsExcludeRegex           string               `toml:"namespace-exclude-regex"`
-	ClusterName              string               `toml:"cluster-name"`
-	Print                    bool                 `toml:"print-config"`
-	Version                  bool
-	Stats                    bool
-	IndexStats               bool   `toml:"index-stats"`
-	StatsDuration            string `toml:"stats-duration"`
-	StatsIndexFormat         string `toml:"stats-index-format"`
-	Gzip                     bool
-	Verbose                  bool
-	Resume                   bool
-	ResumeWriteUnsafe        bool  `toml:"resume-write-unsafe"`
-	ResumeFromTimestamp      int64 `toml:"resume-from-timestamp"`
-	Replay                   bool
-	DroppedDatabases         bool   `toml:"dropped-databases"`
-	DroppedCollections       bool   `toml:"dropped-collections"`
-	IndexFiles               bool   `toml:"index-files"`
-	FileHighlighting         bool   `toml:"file-highlighting"`
-	EnablePatches            bool   `toml:"enable-patches"`
-	FailFast                 bool   `toml:"fail-fast"`
-	IndexOplogTime           bool   `toml:"index-oplog-time"`
-	ExitAfterDirectReads     bool   `toml:"exit-after-direct-reads"`
-	MergePatchAttr           string `toml:"merge-patch-attribute"`
-	ElasticMaxConns          int    `toml:"elasticsearch-max-conns"`
-	ElasticRetry             bool   `toml:"elasticsearch-retry"`
-	ElasticMaxDocs           int    `toml:"elasticsearch-max-docs"`
-	ElasticMaxBytes          int    `toml:"elasticsearch-max-bytes"`
-	ElasticMaxSeconds        int    `toml:"elasticsearch-max-seconds"`
-	ElasticClientTimeout     int    `toml:"elasticsearch-client-timeout"`
-	ElasticMajorVersion      int
-	MaxFileSize              int64 `toml:"max-file-size"`
-	ConfigFile               string
-	Script                   []javascript
-	Mapping                  []IndexTypeMapping
-	FileNamespaces           stringargs `toml:"file-namespaces"`
-	PatchNamespaces          stringargs `toml:"patch-namespaces"`
-	Workers                  stringargs
-	Worker                   string
-	DirectReadNs             stringargs `toml:"direct-read-namespaces"`
-	DirectReadLimit          int        `toml:"direct-read-limit"`
-	DirectReadBatchSize      int        `toml:"direct-read-batch-size"`
-	DirectReadersPerCol      int        `toml:"direct-readers-per-col"`
-	MapperPluginPath         string     `toml:"mapper-plugin-path"`
-	EnableHTTPServer         bool       `toml:"enable-http-server"`
-	HTTPServerAddr           string     `toml:"http-server-addr"`
+func (config *ConfigOptions) LoadPatchNamespaces() *ConfigOptions {
+	patchNamespaces = make(map[string]bool)
+	for _, namespace := range config.PatchNamespaces {
+		patchNamespaces[namespace] = true
+	}
+	return config
 }
 
-// Functionality ----------------------------------------------------------
+func (config *ConfigOptions) LoadGridFsConfig() *ConfigOptions {
+	fileNamespaces = make(map[string]bool)
+	for _, namespace := range config.FileNamespaces {
+		fileNamespaces[namespace] = true
+	}
+	return config
+}
+
 func (config *ConfigOptions) isSharded() bool {
 	return config.MongoConfigURL != ""
 }
@@ -513,7 +461,7 @@ func (config *ConfigOptions) loadIndexTypes() {
 
 func (config *ConfigOptions) loadScripts() {
 	if config.Script != nil {
-		mapEnvs = make(map[string]*executionEnv)
+		MapEnvs = make(map[string]*executionEnv)
 		for _, s := range config.Script {
 			if s.Namespace != "" && s.Script != "" {
 				env := &executionEnv{
@@ -534,27 +482,12 @@ func (config *ConfigOptions) loadScripts() {
 					panic("module.exports must be a function")
 
 				}
-				mapEnvs[s.Namespace] = env
+				MapEnvs[s.Namespace] = env
 			} else {
 				panic("Scripts must specify namespace and script attributes")
 			}
 		}
 	}
-}
-
-func normalizeIndexName(name string) (normal string) {
-	normal = strings.ToLower(strings.TrimPrefix(name, "_"))
-	return
-}
-
-func normalizeTypeName(name string) (normal string) {
-	normal = strings.TrimPrefix(name, "_")
-	return
-}
-
-func normalizeEsID(id string) (normal string) {
-	normal = strings.TrimPrefix(id, "_")
-	return
 }
 
 func (config *ConfigOptions) loadPlugins() *ConfigOptions {
@@ -569,10 +502,201 @@ func (config *ConfigOptions) loadPlugins() *ConfigOptions {
 		}
 		switch mapper.(type) {
 		case func(*monstachemap.MapperPluginInput) (*monstachemap.MapperPluginOutput, error):
-			mapperPlugin = mapper.(func(*monstachemap.MapperPluginInput) (*monstachemap.MapperPluginOutput, error))
+			MapperPlugin = mapper.(func(*monstachemap.MapperPluginInput) (*monstachemap.MapperPluginOutput, error))
 		default:
-			log.GetInstance().ErrorLog.Panicf("Plugin 'Map' function must be typed %T", mapperPlugin)
+			log.GetInstance().ErrorLog.Panicf("Plugin 'Map' function must be typed %T", MapperPlugin)
 		}
+	}
+	return config
+}
+
+func (config *ConfigOptions) loadConfigFile() *ConfigOptions {
+	if config.ConfigFile != "" {
+		var tomlConfig = ConfigOptions{
+			DroppedDatabases:     true,
+			DroppedCollections:   true,
+			MongoDialSettings:    mongoDialSettings{Timeout: -1},
+			MongoSessionSettings: mongoSessionSettings{SocketTimeout: -1, SyncTimeout: -1},
+			GtmSettings:          gtmDefaultSettings(),
+		}
+		if _, err := toml.DecodeFile(config.ConfigFile, &tomlConfig); err != nil {
+			panic(err)
+		}
+		if config.MongoURL == "" {
+			config.MongoURL = tomlConfig.MongoURL
+		}
+		if config.MongoConfigURL == "" {
+			config.MongoConfigURL = tomlConfig.MongoConfigURL
+		}
+		if config.MongoPemFile == "" {
+			config.MongoPemFile = tomlConfig.MongoPemFile
+		}
+		if config.MongoValidatePemFile && !tomlConfig.MongoValidatePemFile {
+			config.MongoValidatePemFile = false
+		}
+		if config.MongoOpLogDatabaseName == "" {
+			config.MongoOpLogDatabaseName = tomlConfig.MongoOpLogDatabaseName
+		}
+		if config.MongoOpLogCollectionName == "" {
+			config.MongoOpLogCollectionName = tomlConfig.MongoOpLogCollectionName
+		}
+		if config.MongoCursorTimeout == "" {
+			config.MongoCursorTimeout = tomlConfig.MongoCursorTimeout
+		}
+		if config.ElasticUser == "" {
+			config.ElasticUser = tomlConfig.ElasticUser
+		}
+		if config.ElasticPassword == "" {
+			config.ElasticPassword = tomlConfig.ElasticPassword
+		}
+		if config.ElasticPemFile == "" {
+			config.ElasticPemFile = tomlConfig.ElasticPemFile
+		}
+		if config.ElasticValidatePemFile && !tomlConfig.ElasticValidatePemFile {
+			config.ElasticValidatePemFile = false
+		}
+		if config.ElasticVersion == "" {
+			config.ElasticVersion = tomlConfig.ElasticVersion
+		}
+		if config.ElasticMaxConns == 0 {
+			config.ElasticMaxConns = tomlConfig.ElasticMaxConns
+		}
+		if !config.ElasticRetry && tomlConfig.ElasticRetry {
+			config.ElasticRetry = true
+		}
+		if config.ElasticMaxDocs == 0 {
+			config.ElasticMaxDocs = tomlConfig.ElasticMaxDocs
+		}
+		if config.ElasticMaxBytes == 0 {
+			config.ElasticMaxBytes = tomlConfig.ElasticMaxBytes
+		}
+		if config.ElasticMaxSeconds == 0 {
+			config.ElasticMaxSeconds = tomlConfig.ElasticMaxSeconds
+		}
+		if config.ElasticClientTimeout == 0 {
+			config.ElasticClientTimeout = tomlConfig.ElasticClientTimeout
+		}
+		if config.MaxFileSize == 0 {
+			config.MaxFileSize = tomlConfig.MaxFileSize
+		}
+		if config.DirectReadLimit == 0 {
+			config.DirectReadLimit = tomlConfig.DirectReadLimit
+		}
+		if config.DirectReadBatchSize == 0 {
+			config.DirectReadBatchSize = tomlConfig.DirectReadBatchSize
+		}
+		if config.DirectReadersPerCol == 0 {
+			config.DirectReadersPerCol = tomlConfig.DirectReadersPerCol
+		}
+		if config.DroppedDatabases && !tomlConfig.DroppedDatabases {
+			config.DroppedDatabases = false
+		}
+		if config.DroppedCollections && !tomlConfig.DroppedCollections {
+			config.DroppedCollections = false
+		}
+		if !config.Gzip && tomlConfig.Gzip {
+			config.Gzip = true
+		}
+		if !config.Verbose && tomlConfig.Verbose {
+			config.Verbose = true
+		}
+		if !config.Stats && tomlConfig.Stats {
+			config.Stats = true
+		}
+		if !config.IndexStats && tomlConfig.IndexStats {
+			config.IndexStats = true
+		}
+		if config.StatsDuration == "" {
+			config.StatsDuration = tomlConfig.StatsDuration
+		}
+		if config.StatsIndexFormat == "" {
+			config.StatsIndexFormat = tomlConfig.StatsIndexFormat
+		}
+		if !config.IndexFiles && tomlConfig.IndexFiles {
+			config.IndexFiles = true
+		}
+		if !config.FileHighlighting && tomlConfig.FileHighlighting {
+			config.FileHighlighting = true
+		}
+		if !config.EnablePatches && tomlConfig.EnablePatches {
+			config.EnablePatches = true
+		}
+		if !config.Replay && tomlConfig.Replay {
+			config.Replay = true
+		}
+		if !config.Resume && tomlConfig.Resume {
+			config.Resume = true
+		}
+		if !config.ResumeWriteUnsafe && tomlConfig.ResumeWriteUnsafe {
+			config.ResumeWriteUnsafe = true
+		}
+		if config.ResumeFromTimestamp == 0 {
+			config.ResumeFromTimestamp = tomlConfig.ResumeFromTimestamp
+		}
+		if config.MergePatchAttr == "" {
+			config.MergePatchAttr = tomlConfig.MergePatchAttr
+		}
+		if !config.FailFast && tomlConfig.FailFast {
+			config.FailFast = true
+		}
+		if !config.IndexOplogTime && tomlConfig.IndexOplogTime {
+			config.IndexOplogTime = true
+		}
+		if !config.ExitAfterDirectReads && tomlConfig.ExitAfterDirectReads {
+			config.ExitAfterDirectReads = true
+		}
+		if config.Resume && config.ResumeName == "" {
+			config.ResumeName = tomlConfig.ResumeName
+		}
+		if config.ClusterName == "" {
+			config.ClusterName = tomlConfig.ClusterName
+		}
+		if config.NsRegex == "" {
+			config.NsRegex = tomlConfig.NsRegex
+		}
+		if config.NsExcludeRegex == "" {
+			config.NsExcludeRegex = tomlConfig.NsExcludeRegex
+		}
+		if config.IndexFiles {
+			if len(config.FileNamespaces) == 0 {
+				config.FileNamespaces = tomlConfig.FileNamespaces
+			}
+			config.LoadGridFsConfig()
+		}
+		if config.Worker == "" {
+			config.Worker = tomlConfig.Worker
+		}
+		if config.MapperPluginPath == "" {
+			config.MapperPluginPath = tomlConfig.MapperPluginPath
+		}
+		if config.EnablePatches {
+			if len(config.PatchNamespaces) == 0 {
+				config.PatchNamespaces = tomlConfig.PatchNamespaces
+			}
+			config.LoadPatchNamespaces()
+		}
+		if len(config.DirectReadNs) == 0 {
+			config.DirectReadNs = tomlConfig.DirectReadNs
+		}
+		if len(config.ElasticUrls) == 0 {
+			config.ElasticUrls = tomlConfig.ElasticUrls
+		}
+		if len(config.Workers) == 0 {
+			config.Workers = tomlConfig.Workers
+		}
+		if !config.EnableHTTPServer && tomlConfig.EnableHTTPServer {
+			config.EnableHTTPServer = true
+		}
+		if config.HTTPServerAddr == "" {
+			config.HTTPServerAddr = tomlConfig.HTTPServerAddr
+		}
+		config.MongoDialSettings = tomlConfig.MongoDialSettings
+		config.MongoSessionSettings = tomlConfig.MongoSessionSettings
+		config.GtmSettings = tomlConfig.GtmSettings
+		config.Logs = tomlConfig.Logs
+		tomlConfig.setupLogging()
+		tomlConfig.loadScripts()
+		tomlConfig.loadIndexTypes()
 	}
 	return config
 }

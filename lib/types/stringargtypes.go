@@ -2,13 +2,13 @@ package types
 
 import "fmt"
 
-type stringargs []string
+type Stringargs []string
 
-func (args *stringargs) String() string {
+func (args *Stringargs) String() string {
 	return fmt.Sprintf("%s", *args)
 }
 
-func (args *stringargs) Set(value string) error {
+func (args *Stringargs) Set(value string) error {
 	*args = append(*args, value)
 	return nil
 }

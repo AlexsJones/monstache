@@ -1,4 +1,4 @@
-package types
+package find
 
 import (
 	"errors"
@@ -9,17 +9,6 @@ import (
 	"github.com/globalsign/mgo/bson"
 	"github.com/robertkrimen/otto"
 )
-
-type FindCall struct {
-	config  *findConf
-	session *mgo.Session
-	query   interface{}
-	db      string
-	col     string
-	limit   int
-	sort    []string
-	sel     map[string]int
-}
 
 func (fc *FindCall) setDatabase(topts map[string]interface{}) (err error) {
 	if ov, ok := topts["database"]; ok {
@@ -202,4 +191,41 @@ func (fc *FindCall) execute() (r otto.Value, err error) {
 		}
 	}
 	return
+}
+
+func makeFind(fa *FindConf) func(otto.FunctionCall) otto.Value {
+	return func(call otto.FunctionCall) (r otto.Value) {
+		var err error
+		fc := &FindCall{
+			config:  fa,
+			session: fa.session.Copy(),
+			sel:     make(map[string]int),
+		}
+		defer fc.session.Close()
+		fc.setDefaults()
+		args := call.ArgumentList
+		argLen := len(args)
+		r = otto.NullValue()
+		if argLen >= 1 {
+			if argLen >= 2 {
+				if err = fc.setOptions(call.Argument(1)); err != nil {
+					fc.logError(err)
+					return
+				}
+			}
+			if err = fc.setQuery(call.Argument(0)); err == nil {
+				var result otto.Value
+				if result, err = fc.execute(); err == nil {
+					r = result
+				} else {
+					fc.logError(err)
+				}
+			} else {
+				fc.logError(err)
+			}
+		} else {
+			fc.logError(errors.New("At least one argument is required"))
+		}
+		return
+	}
 }

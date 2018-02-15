@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AlexsJones/monstache/lib/log"
 	"github.com/AlexsJones/monstache/lib/types"
-	"github.com/BurntSushi/toml"
 	"github.com/coreos/go-systemd/daemon"
 	"github.com/evanphx/json-patch"
 	"github.com/globalsign/mgo"
@@ -29,7 +29,6 @@ import (
 	"github.com/rwynn/gtm/consistent"
 	"github.com/rwynn/monstache/monstachemap"
 	"golang.org/x/net/context"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 var gridByteBuffer bytes.Buffer
@@ -93,7 +92,7 @@ func deepExportValue(a interface{}) (b interface{}) {
 		if err == nil {
 			b = deepExportValue(ex)
 		} else {
-			errorLog.Printf("Error exporting from javascript: %s", err)
+			log.GetInstance().ErrorLog.Printf("Error exporting from javascript: %s", err)
 		}
 	case map[string]interface{}:
 		b = deepExportMap(t)
@@ -122,10 +121,10 @@ func deepExportMap(e map[string]interface{}) map[string]interface{} {
 }
 
 func mapDataJavascript(op *gtm.Op) error {
-	if mapEnvs == nil {
+	if types.MapEnvs == nil {
 		return nil
 	}
-	if env := mapEnvs[op.Namespace]; env != nil {
+	if env := types.MapEnvs[op.Namespace]; env != nil {
 		arg := convertMapJavascript(op.Data)
 		val, err := env.VM.Call("module.exports", arg, arg)
 		if err != nil {
@@ -164,7 +163,7 @@ func mapDataGolang(s *mgo.Session, op *gtm.Op) error {
 		Operation:  op.Operation,
 		Session:    session,
 	}
-	output, err := mapperPlugin(input)
+	output, err := types.MapperPlugin(input)
 	if err != nil {
 		return err
 	}
@@ -234,34 +233,6 @@ func prepareDataForIndexing(config *types.ConfigOptions, op *gtm.Op) {
 	delete(data, "_meta_monstache")
 }
 
-func parseIndexMeta(op *gtm.Op) (meta *types.IndexingMeta) {
-	meta = &indexingMeta{
-		Version:     int64(op.Timestamp),
-		VersionType: "external",
-	}
-	if m, ok := op.Data["_meta_monstache"]; ok {
-		switch m.(type) {
-		case map[string]interface{}:
-			metaAttrs := m.(map[string]interface{})
-			meta.load(metaAttrs)
-		case otto.Value:
-			ex, err := m.(otto.Value).Export()
-			if err == nil && ex != m {
-				switch ex.(type) {
-				case map[string]interface{}:
-					metaAttrs := ex.(map[string]interface{})
-					meta.load(metaAttrs)
-				default:
-					errorLog.Println("Invalid indexing metadata")
-				}
-			}
-		default:
-			errorLog.Println("Invalid indexing metadata")
-		}
-	}
-	return meta
-}
-
 func addFileContent(s *mgo.Session, op *gtm.Op, config *types.ConfigOptions) (err error) {
 	session := s.Copy()
 	defer session.Close()
@@ -278,7 +249,7 @@ func addFileContent(s *mgo.Session, op *gtm.Op, config *types.ConfigOptions) (er
 	defer file.Close()
 	if config.MaxFileSize > 0 {
 		if file.Size() > config.MaxFileSize {
-			infoLog.Printf("File %s md5(%s) exceeds max file size. file content omitted.",
+			log.GetInstance().InfoLog.Printf("File %s md5(%s) exceeds max file size. file content omitted.",
 				file.Name(), file.MD5())
 			return
 		}
@@ -406,238 +377,6 @@ func saveTimestamp(s *mgo.Session, ts bson.MongoTimestamp, config *types.ConfigO
 	doc["ts"] = ts
 	_, err := col.UpsertId(config.ResumeName, bson.M{"$set": doc})
 	return err
-}
-
-func (config *types.ConfigOptions) loadConfigFile() *types.ConfigOptions {
-	if config.ConfigFile != "" {
-		var tomlConfig = types.ConfigOptions{
-			DroppedDatabases:     true,
-			DroppedCollections:   true,
-			MongoDialSettings:    mongoDialSettings{Timeout: -1},
-			MongoSessionSettings: mongoSessionSettings{SocketTimeout: -1, SyncTimeout: -1},
-			GtmSettings:          gtmDefaultSettings(),
-		}
-		if _, err := toml.DecodeFile(config.ConfigFile, &tomlConfig); err != nil {
-			panic(err)
-		}
-		if config.MongoURL == "" {
-			config.MongoURL = tomlConfig.MongoURL
-		}
-		if config.MongoConfigURL == "" {
-			config.MongoConfigURL = tomlConfig.MongoConfigURL
-		}
-		if config.MongoPemFile == "" {
-			config.MongoPemFile = tomlConfig.MongoPemFile
-		}
-		if config.MongoValidatePemFile && !tomlConfig.MongoValidatePemFile {
-			config.MongoValidatePemFile = false
-		}
-		if config.MongoOpLogDatabaseName == "" {
-			config.MongoOpLogDatabaseName = tomlConfig.MongoOpLogDatabaseName
-		}
-		if config.MongoOpLogCollectionName == "" {
-			config.MongoOpLogCollectionName = tomlConfig.MongoOpLogCollectionName
-		}
-		if config.MongoCursorTimeout == "" {
-			config.MongoCursorTimeout = tomlConfig.MongoCursorTimeout
-		}
-		if config.ElasticUser == "" {
-			config.ElasticUser = tomlConfig.ElasticUser
-		}
-		if config.ElasticPassword == "" {
-			config.ElasticPassword = tomlConfig.ElasticPassword
-		}
-		if config.ElasticPemFile == "" {
-			config.ElasticPemFile = tomlConfig.ElasticPemFile
-		}
-		if config.ElasticValidatePemFile && !tomlConfig.ElasticValidatePemFile {
-			config.ElasticValidatePemFile = false
-		}
-		if config.ElasticVersion == "" {
-			config.ElasticVersion = tomlConfig.ElasticVersion
-		}
-		if config.ElasticMaxConns == 0 {
-			config.ElasticMaxConns = tomlConfig.ElasticMaxConns
-		}
-		if !config.ElasticRetry && tomlConfig.ElasticRetry {
-			config.ElasticRetry = true
-		}
-		if config.ElasticMaxDocs == 0 {
-			config.ElasticMaxDocs = tomlConfig.ElasticMaxDocs
-		}
-		if config.ElasticMaxBytes == 0 {
-			config.ElasticMaxBytes = tomlConfig.ElasticMaxBytes
-		}
-		if config.ElasticMaxSeconds == 0 {
-			config.ElasticMaxSeconds = tomlConfig.ElasticMaxSeconds
-		}
-		if config.ElasticClientTimeout == 0 {
-			config.ElasticClientTimeout = tomlConfig.ElasticClientTimeout
-		}
-		if config.MaxFileSize == 0 {
-			config.MaxFileSize = tomlConfig.MaxFileSize
-		}
-		if config.DirectReadLimit == 0 {
-			config.DirectReadLimit = tomlConfig.DirectReadLimit
-		}
-		if config.DirectReadBatchSize == 0 {
-			config.DirectReadBatchSize = tomlConfig.DirectReadBatchSize
-		}
-		if config.DirectReadersPerCol == 0 {
-			config.DirectReadersPerCol = tomlConfig.DirectReadersPerCol
-		}
-		if config.DroppedDatabases && !tomlConfig.DroppedDatabases {
-			config.DroppedDatabases = false
-		}
-		if config.DroppedCollections && !tomlConfig.DroppedCollections {
-			config.DroppedCollections = false
-		}
-		if !config.Gzip && tomlConfig.Gzip {
-			config.Gzip = true
-		}
-		if !config.Verbose && tomlConfig.Verbose {
-			config.Verbose = true
-		}
-		if !config.Stats && tomlConfig.Stats {
-			config.Stats = true
-		}
-		if !config.IndexStats && tomlConfig.IndexStats {
-			config.IndexStats = true
-		}
-		if config.StatsDuration == "" {
-			config.StatsDuration = tomlConfig.StatsDuration
-		}
-		if config.StatsIndexFormat == "" {
-			config.StatsIndexFormat = tomlConfig.StatsIndexFormat
-		}
-		if !config.IndexFiles && tomlConfig.IndexFiles {
-			config.IndexFiles = true
-		}
-		if !config.FileHighlighting && tomlConfig.FileHighlighting {
-			config.FileHighlighting = true
-		}
-		if !config.EnablePatches && tomlConfig.EnablePatches {
-			config.EnablePatches = true
-		}
-		if !config.Replay && tomlConfig.Replay {
-			config.Replay = true
-		}
-		if !config.Resume && tomlConfig.Resume {
-			config.Resume = true
-		}
-		if !config.ResumeWriteUnsafe && tomlConfig.ResumeWriteUnsafe {
-			config.ResumeWriteUnsafe = true
-		}
-		if config.ResumeFromTimestamp == 0 {
-			config.ResumeFromTimestamp = tomlConfig.ResumeFromTimestamp
-		}
-		if config.MergePatchAttr == "" {
-			config.MergePatchAttr = tomlConfig.MergePatchAttr
-		}
-		if !config.FailFast && tomlConfig.FailFast {
-			config.FailFast = true
-		}
-		if !config.IndexOplogTime && tomlConfig.IndexOplogTime {
-			config.IndexOplogTime = true
-		}
-		if !config.ExitAfterDirectReads && tomlConfig.ExitAfterDirectReads {
-			config.ExitAfterDirectReads = true
-		}
-		if config.Resume && config.ResumeName == "" {
-			config.ResumeName = tomlConfig.ResumeName
-		}
-		if config.ClusterName == "" {
-			config.ClusterName = tomlConfig.ClusterName
-		}
-		if config.NsRegex == "" {
-			config.NsRegex = tomlConfig.NsRegex
-		}
-		if config.NsExcludeRegex == "" {
-			config.NsExcludeRegex = tomlConfig.NsExcludeRegex
-		}
-		if config.IndexFiles {
-			if len(config.FileNamespaces) == 0 {
-				config.FileNamespaces = tomlConfig.FileNamespaces
-			}
-			config.LoadGridFsConfig()
-		}
-		if config.Worker == "" {
-			config.Worker = tomlConfig.Worker
-		}
-		if config.MapperPluginPath == "" {
-			config.MapperPluginPath = tomlConfig.MapperPluginPath
-		}
-		if config.EnablePatches {
-			if len(config.PatchNamespaces) == 0 {
-				config.PatchNamespaces = tomlConfig.PatchNamespaces
-			}
-			config.LoadPatchNamespaces()
-		}
-		if len(config.DirectReadNs) == 0 {
-			config.DirectReadNs = tomlConfig.DirectReadNs
-		}
-		if len(config.ElasticUrls) == 0 {
-			config.ElasticUrls = tomlConfig.ElasticUrls
-		}
-		if len(config.Workers) == 0 {
-			config.Workers = tomlConfig.Workers
-		}
-		if !config.EnableHTTPServer && tomlConfig.EnableHTTPServer {
-			config.EnableHTTPServer = true
-		}
-		if config.HTTPServerAddr == "" {
-			config.HTTPServerAddr = tomlConfig.HTTPServerAddr
-		}
-		config.MongoDialSettings = tomlConfig.MongoDialSettings
-		config.MongoSessionSettings = tomlConfig.MongoSessionSettings
-		config.GtmSettings = tomlConfig.GtmSettings
-		config.Logs = tomlConfig.Logs
-		tomlConfig.setupLogging()
-		tomlConfig.loadScripts()
-		tomlConfig.loadIndexTypes()
-	}
-	return config
-}
-
-func (config *types.ConfigOptions) newLogger(path string) *lumberjack.Logger {
-	return &lumberjack.Logger{
-		Filename:   path,
-		MaxSize:    500, // megabytes
-		MaxBackups: 5,
-		MaxAge:     28, //days
-	}
-}
-
-func (config *types.ConfigOptions) setupLogging() {
-	logs := config.Logs
-	if logs.Info != "" {
-		infoLog.SetOutput(config.newLogger(logs.Info))
-	}
-	if logs.Error != "" {
-		errorLog.SetOutput(config.newLogger(logs.Error))
-	}
-	if logs.Trace != "" {
-		traceLog.SetOutput(config.newLogger(logs.Trace))
-	}
-	if logs.Stats != "" {
-		statsLog.SetOutput(config.newLogger(logs.Stats))
-	}
-}
-
-func (config *types.ConfigOptions) LoadPatchNamespaces() *types.ConfigOptions {
-	patchNamespaces = make(map[string]bool)
-	for _, namespace := range config.PatchNamespaces {
-		patchNamespaces[namespace] = true
-	}
-	return config
-}
-
-func (config *types.ConfigOptions) LoadGridFsConfig() *types.ConfigOptions {
-	fileNamespaces = make(map[string]bool)
-	for _, namespace := range config.FileNamespaces {
-		fileNamespaces[namespace] = true
-	}
-	return config
 }
 
 func (config *types.ConfigOptions) dump() {
@@ -937,43 +676,6 @@ func loadBuiltinFunctions(s *mgo.Session) {
 		if err := env.VM.Set(fa.name, makeFind(fa)); err != nil {
 			panic(err)
 		}
-	}
-}
-
-func makeFind(fa *findConf) func(otto.FunctionCall) otto.Value {
-	return func(call otto.FunctionCall) (r otto.Value) {
-		var err error
-		fc := &findCall{
-			config:  fa,
-			session: fa.session.Copy(),
-			sel:     make(map[string]int),
-		}
-		defer fc.session.Close()
-		fc.setDefaults()
-		args := call.ArgumentList
-		argLen := len(args)
-		r = otto.NullValue()
-		if argLen >= 1 {
-			if argLen >= 2 {
-				if err = fc.setOptions(call.Argument(1)); err != nil {
-					fc.logError(err)
-					return
-				}
-			}
-			if err = fc.setQuery(call.Argument(0)); err == nil {
-				var result otto.Value
-				if result, err = fc.execute(); err == nil {
-					r = result
-				} else {
-					fc.logError(err)
-				}
-			} else {
-				fc.logError(err)
-			}
-		} else {
-			fc.logError(errors.New("At least one argument is required"))
-		}
-		return
 	}
 }
 

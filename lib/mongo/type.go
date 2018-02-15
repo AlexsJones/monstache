@@ -1,11 +1,11 @@
-package types
+package mongo
 
-type mongoDialSettings struct {
+type MongoDialSettings struct {
 	Timeout int
 	Ssl     bool
 }
 
-type mongoSessionSettings struct {
+type MongoSessionSettings struct {
 	SocketTimeout int `toml:"socket-timeout"`
 	SyncTimeout   int `toml:"sync-timeout"`
 }
