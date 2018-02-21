@@ -10,10 +10,10 @@ import (
 	"github.com/robertkrimen/otto"
 )
 
-func (fc *FindCall) setDatabase(topts map[string]interface{}) (err error) {
+func (fc *FindCall) SetDatabase(topts map[string]interface{}) (err error) {
 	if ov, ok := topts["database"]; ok {
 		if ovs, ok := ov.(string); ok {
-			fc.db = ovs
+			fc.Db = ovs
 		} else {
 			err = errors.New("Invalid database option value")
 		}
@@ -21,10 +21,10 @@ func (fc *FindCall) setDatabase(topts map[string]interface{}) (err error) {
 	return
 }
 
-func (fc *FindCall) setCollection(topts map[string]interface{}) (err error) {
+func (fc *FindCall) SetCollection(topts map[string]interface{}) (err error) {
 	if ov, ok := topts["collection"]; ok {
 		if ovs, ok := ov.(string); ok {
-			fc.col = ovs
+			fc.Col = ovs
 		} else {
 			err = errors.New("Invalid collection option value")
 		}
@@ -32,12 +32,12 @@ func (fc *FindCall) setCollection(topts map[string]interface{}) (err error) {
 	return
 }
 
-func (fc *FindCall) setSelect(topts map[string]interface{}) (err error) {
+func (fc *FindCall) SetSelect(topts map[string]interface{}) (err error) {
 	if ov, ok := topts["select"]; ok {
 		if ovsel, ok := ov.(map[string]interface{}); ok {
 			for k, v := range ovsel {
 				if vi, ok := v.(int64); ok {
-					fc.sel[k] = int(vi)
+					fc.Sel[k] = int(vi)
 				}
 			}
 		} else {
@@ -47,10 +47,10 @@ func (fc *FindCall) setSelect(topts map[string]interface{}) (err error) {
 	return
 }
 
-func (fc *FindCall) setSort(topts map[string]interface{}) (err error) {
+func (fc *FindCall) SetSort(topts map[string]interface{}) (err error) {
 	if ov, ok := topts["sort"]; ok {
 		if ovs, ok := ov.([]string); ok {
-			fc.sort = ovs
+			fc.Sort = ovs
 		} else {
 			err = errors.New("Invalid sort option value")
 		}
@@ -58,10 +58,10 @@ func (fc *FindCall) setSort(topts map[string]interface{}) (err error) {
 	return
 }
 
-func (fc *FindCall) setLimit(topts map[string]interface{}) (err error) {
+func (fc *FindCall) SetLimit(topts map[string]interface{}) (err error) {
 	if ov, ok := topts["limit"]; ok {
 		if ovl, ok := ov.(int64); ok {
-			fc.limit = int(ovl)
+			fc.Limit = int(ovl)
 		} else {
 			err = errors.New("Invalid limit option value")
 		}
@@ -69,33 +69,33 @@ func (fc *FindCall) setLimit(topts map[string]interface{}) (err error) {
 	return
 }
 
-func (fc *FindCall) setQuery(v otto.Value) (err error) {
+func (fc *FindCall) SetQuery(v otto.Value) (err error) {
 	var q interface{}
 	if q, err = v.Export(); err == nil {
-		fc.query = fc.restoreIds(q)
+		fc.Query = fc.restoreIds(q)
 	}
 	return
 }
 
-func (fc *FindCall) setOptions(v otto.Value) (err error) {
+func (fc *FindCall) SetOptions(v otto.Value) (err error) {
 	var opts interface{}
 	if opts, err = v.Export(); err == nil {
 		switch topts := opts.(type) {
 		case map[string]interface{}:
-			if err = fc.setDatabase(topts); err != nil {
+			if err = fc.SetDatabase(topts); err != nil {
 				return
 			}
-			if err = fc.setCollection(topts); err != nil {
+			if err = fc.SetCollection(topts); err != nil {
 				return
 			}
-			if err = fc.setSelect(topts); err != nil {
+			if err = fc.SetSelect(topts); err != nil {
 				return
 			}
 			if fc.isMulti() {
-				if err = fc.setSort(topts); err != nil {
+				if err = fc.SetSort(topts); err != nil {
 					return
 				}
-				if err = fc.setLimit(topts); err != nil {
+				if err = fc.SetLimit(topts); err != nil {
 					return
 				}
 			}
@@ -110,25 +110,25 @@ func (fc *FindCall) setOptions(v otto.Value) (err error) {
 }
 
 func (fc *FindCall) setDefaults() {
-	ns := strings.Split(fc.config.ns, ".")
-	fc.db = ns[0]
-	fc.col = ns[1]
+	ns := strings.Split(fc.Config.Ns, ".")
+	fc.Db = ns[0]
+	fc.Col = ns[1]
 }
 
 func (fc *FindCall) getCollection() *mgo.Collection {
-	return fc.session.DB(fc.db).C(fc.col)
+	return fc.Session.DB(fc.Db).C(fc.Col)
 }
 
 func (fc *FindCall) getVM() *otto.Otto {
-	return fc.config.vm
+	return fc.Config.Vm
 }
 
 func (fc *FindCall) getFunctionName() string {
-	return fc.config.name
+	return fc.Config.Name
 }
 
 func (fc *FindCall) isMulti() bool {
-	return fc.config.multi
+	return fc.Config.Multi
 }
 
 func (fc *FindCall) logError(err error) {
@@ -165,27 +165,27 @@ func (fc *FindCall) execute() (r otto.Value, err error) {
 	col := fc.getCollection()
 	if fc.isMulti() {
 		var docs []map[string]interface{}
-		mq := col.Find(fc.query)
-		if fc.limit > 0 {
-			mq.Limit(fc.limit)
+		mq := col.Find(fc.Query)
+		if fc.Limit > 0 {
+			mq.Limit(fc.Limit)
 		}
-		if len(fc.sort) > 0 {
-			mq.Sort(fc.sort...)
+		if len(fc.Sort) > 0 {
+			mq.Sort(fc.Sort...)
 		}
-		if len(fc.sel) > 0 {
-			mq.Select(fc.sel)
+		if len(fc.Sel) > 0 {
+			mq.Select(fc.Sel)
 		}
 		if err = mq.All(&docs); err == nil {
 			r, err = fc.getVM().ToValue(docs)
 		}
 	} else {
 		doc := make(map[string]interface{})
-		if fc.config.byId {
-			if err = col.FindId(fc.query).One(doc); err == nil {
+		if fc.Config.ById {
+			if err = col.FindId(fc.Query).One(doc); err == nil {
 				r, err = fc.getVM().ToValue(doc)
 			}
 		} else {
-			if err = col.Find(fc.query).One(doc); err == nil {
+			if err = col.Find(fc.Query).One(doc); err == nil {
 				r, err = fc.getVM().ToValue(doc)
 			}
 		}
@@ -193,27 +193,27 @@ func (fc *FindCall) execute() (r otto.Value, err error) {
 	return
 }
 
-func makeFind(fa *FindConf) func(otto.FunctionCall) otto.Value {
+func MakeFind(fa *FindConf) func(otto.FunctionCall) otto.Value {
 	return func(call otto.FunctionCall) (r otto.Value) {
 		var err error
 		fc := &FindCall{
-			config:  fa,
-			session: fa.session.Copy(),
-			sel:     make(map[string]int),
+			Config:  fa,
+			Session: fa.Session.Copy(),
+			Sel:     make(map[string]int),
 		}
-		defer fc.session.Close()
+		defer fc.Session.Close()
 		fc.setDefaults()
 		args := call.ArgumentList
 		argLen := len(args)
 		r = otto.NullValue()
 		if argLen >= 1 {
 			if argLen >= 2 {
-				if err = fc.setOptions(call.Argument(1)); err != nil {
+				if err = fc.SetOptions(call.Argument(1)); err != nil {
 					fc.logError(err)
 					return
 				}
 			}
-			if err = fc.setQuery(call.Argument(0)); err == nil {
+			if err = fc.SetQuery(call.Argument(0)); err == nil {
 				var result otto.Value
 				if result, err = fc.execute(); err == nil {
 					r = result

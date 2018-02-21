@@ -44,7 +44,7 @@ func (meta *IndexingMeta) Load(metaAttrs map[string]interface{}) {
 	}
 }
 
-func (meta *IndexingMeta) shouldSave() bool {
+func (meta *IndexingMeta) ShouldSave() bool {
 	return (meta.Routing != "" ||
 		meta.Index != "" ||
 		meta.Type != "" ||

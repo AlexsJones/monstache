@@ -28,6 +28,7 @@ import (
 	"github.com/robertkrimen/otto"
 	_ "github.com/robertkrimen/otto/underscore"
 	"github.com/rwynn/elastic"
+	"github.com/rwynn/gtm"
 	"github.com/rwynn/monstache/monstachemap"
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
 )
@@ -73,10 +74,10 @@ func (config *ConfigOptions) LoadGridFsConfig() *ConfigOptions {
 	return config
 }
 
-func (config *ConfigOptions) isSharded() bool {
+func (config *ConfigOptions) IsSharded() bool {
 	return config.MongoConfigURL != ""
 }
-func (config *ConfigOptions) parseElasticsearchVersion(number string) (err error) {
+func (config *ConfigOptions) ParseElasticsearchVersion(number string) (err error) {
 	if number == "" {
 		err = errors.New("Elasticsearch version cannot be blank")
 	} else {
@@ -113,7 +114,7 @@ func afterBulk(executionId int64, requests []elastic.BulkableRequest, response *
 	}
 }
 
-func (config *ConfigOptions) newBulkProcessor(client *elastic.Client) (bulk *elastic.BulkProcessor, err error) {
+func (config *ConfigOptions) NewBulkProcessor(client *elastic.Client) (bulk *elastic.BulkProcessor, err error) {
 	bulkService := client.BulkProcessor().Name("monstache")
 	bulkService.Workers(config.ElasticMaxConns)
 	bulkService.Stats(config.Stats)
@@ -134,7 +135,7 @@ func (config *ConfigOptions) newBulkProcessor(client *elastic.Client) (bulk *ela
 	return bulkService.Do(context.Background())
 }
 
-func (config *ConfigOptions) newStatsBulkProcessor(client *elastic.Client) (bulk *elastic.BulkProcessor, err error) {
+func (config *ConfigOptions) NewStatsBulkProcessor(client *elastic.Client) (bulk *elastic.BulkProcessor, err error) {
 	bulkService := client.BulkProcessor().Name("monstache-stats")
 	bulkService.Workers(1)
 	bulkService.Stats(false)
@@ -143,7 +144,7 @@ func (config *ConfigOptions) newStatsBulkProcessor(client *elastic.Client) (bulk
 	return bulkService.Do(context.Background())
 }
 
-func (config *ConfigOptions) needsSecureScheme() bool {
+func (config *ConfigOptions) NeedsSecureScheme() bool {
 	if len(config.ElasticUrls) > 0 {
 		for _, url := range config.ElasticUrls {
 			if strings.HasPrefix(url, "https") {
@@ -155,12 +156,12 @@ func (config *ConfigOptions) needsSecureScheme() bool {
 
 }
 
-func (config *ConfigOptions) newElasticClient() (client *elastic.Client, err error) {
+func (config *ConfigOptions) NewElasticClient() (client *elastic.Client, err error) {
 	var clientOptions []elastic.ClientOptionFunc
 	var httpClient *http.Client
 	clientOptions = append(clientOptions, elastic.SetErrorLog(log.GetInstance().ErrorLog))
 	clientOptions = append(clientOptions, elastic.SetSniff(false))
-	if config.needsSecureScheme() {
+	if config.NeedsSecureScheme() {
 		clientOptions = append(clientOptions, elastic.SetScheme("https"))
 	}
 	if len(config.ElasticUrls) > 0 {
@@ -217,18 +218,18 @@ func (config *ConfigOptions) NewHTTPClient() (client *http.Client, err error) {
 	return client, err
 }
 
-func (config *ConfigOptions) testElasticsearchConn(client *elastic.Client) (err error) {
+func (config *ConfigOptions) TestElasticsearchConn(client *elastic.Client) (err error) {
 	var number string
 	url := config.ElasticUrls[0]
 	number, err = client.ElasticsearchVersion(url)
 	if err == nil {
 		log.GetInstance().InfoLog.Printf("Successfully connected to Elasticsearch version %s", number)
-		err = config.parseElasticsearchVersion(number)
+		err = config.ParseElasticsearchVersion(number)
 	}
 	return
 }
 
-func notifySdFailed(config *ConfigOptions, err error) {
+func NotifySdFailed(config *ConfigOptions, err error) {
 	if err != nil {
 		log.GetInstance().ErrorLog.Printf("Systemd notification failed: %s", err)
 	} else {
@@ -238,7 +239,7 @@ func notifySdFailed(config *ConfigOptions, err error) {
 	}
 }
 
-func watchdogSdFailed(config *ConfigOptions, err error) {
+func WatchdogSdFailed(config *ConfigOptions, err error) {
 	if err != nil {
 		log.GetInstance().ErrorLog.Printf("Error determining systemd WATCHDOG interval: %s", err)
 	} else {
@@ -248,7 +249,7 @@ func watchdogSdFailed(config *ConfigOptions, err error) {
 	}
 }
 
-func (config *ConfigOptions) setDefaults() *ConfigOptions {
+func (config *ConfigOptions) SetDefaults() *ConfigOptions {
 	if config.MongoURL == "" {
 		config.MongoURL = defaults.MongoURLDefault
 	}
@@ -282,10 +283,11 @@ func (config *ConfigOptions) setDefaults() *ConfigOptions {
 		config.ElasticMaxDocs = defaults.ElasticMaxDocsDefault
 	}
 	if config.MongoURL != "" {
-		config.MongoURL = config.parseMongoURL(config.MongoURL)
+
+		config.MongoURL = config.ParseMongoURL(config.MongoURL)
 	}
 	if config.MongoConfigURL != "" {
-		config.MongoConfigURL = config.parseMongoURL(config.MongoConfigURL)
+		config.MongoConfigURL = config.ParseMongoURL(config.MongoConfigURL)
 	}
 	if config.HTTPServerAddr == "" {
 		config.HTTPServerAddr = ":8080"
@@ -296,7 +298,7 @@ func (config *ConfigOptions) setDefaults() *ConfigOptions {
 	return config
 }
 
-func (config *ConfigOptions) getAuthURL(inURL string) string {
+func (config *ConfigOptions) GetAuthURL(inURL string) string {
 	cred := strings.SplitN(config.MongoURL, "@", 2)
 	if len(cred) == 2 {
 		return cred[0] + "@" + inURL
@@ -305,7 +307,7 @@ func (config *ConfigOptions) getAuthURL(inURL string) string {
 	}
 }
 
-func (config *ConfigOptions) configureMongo(session *mgo.Session) {
+func (config *ConfigOptions) ConfigureMongo(session *mgo.Session) {
 	session.SetMode(mgo.Primary, true)
 	if config.MongoSessionSettings.SocketTimeout != -1 {
 		timeOut := time.Duration(config.MongoSessionSettings.SocketTimeout) * time.Second
@@ -317,7 +319,7 @@ func (config *ConfigOptions) configureMongo(session *mgo.Session) {
 	}
 }
 
-func (config *ConfigOptions) dialMongo(inURL string) (*mgo.Session, error) {
+func (config *ConfigOptions) DialMongo(inURL string) (*mgo.Session, error) {
 	ssl := config.MongoDialSettings.Ssl || config.MongoPemFile != ""
 	if ssl {
 		tlsConfig := &tls.Config{}
@@ -369,7 +371,7 @@ if ssl=true is set on the connection string, remove the option
 from the connection string and enable TLS because the mgo
 driver does not support the option in the connection string
 */
-func (config *ConfigOptions) parseMongoURL(inURL string) (outURL string) {
+func (config *ConfigOptions) ParseMongoURL(inURL string) (outURL string) {
 	const queryDelim string = "?"
 	outURL = inURL
 	hostQuery := strings.SplitN(outURL, queryDelim, 2)
@@ -389,7 +391,7 @@ func (config *ConfigOptions) parseMongoURL(inURL string) (outURL string) {
 	return
 }
 
-func (config *ConfigOptions) parseCommandLineFlags() *ConfigOptions {
+func (config *ConfigOptions) ParseCommandLineFlags() *ConfigOptions {
 	flag.BoolVar(&config.Print, "print-config", false, "Print the configuration and then exit")
 	flag.StringVar(&config.MongoURL, "mongo-url", "", "MongoDB server or router server connection URL")
 	flag.StringVar(&config.MongoConfigURL, "mongo-config-url", "", "MongoDB config server connection URL")
@@ -499,7 +501,7 @@ func (config *ConfigOptions) loadScripts() {
 	}
 }
 
-func (config *ConfigOptions) loadPlugins() *ConfigOptions {
+func (config *ConfigOptions) LoadPlugins() *ConfigOptions {
 	if config.MapperPluginPath != "" {
 		p, err := plugin.Open(config.MapperPluginPath)
 		if err != nil {
@@ -519,7 +521,7 @@ func (config *ConfigOptions) loadPlugins() *ConfigOptions {
 	return config
 }
 
-func (config *ConfigOptions) loadConfigFile() *ConfigOptions {
+func (config *ConfigOptions) LoadConfigFile() *ConfigOptions {
 	if config.ConfigFile != "" {
 		var tomlConfig = ConfigOptions{
 			DroppedDatabases:     true,
@@ -710,11 +712,25 @@ func (config *ConfigOptions) loadConfigFile() *ConfigOptions {
 	return config
 }
 
-func (config *ConfigOptions) dump() {
+func (config *ConfigOptions) Dump() {
 	json, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		log.GetInstance().ErrorLog.Printf("Unable to print configuration: %s", err)
 	} else {
 		log.GetInstance().InfoLog.Println(string(json))
+	}
+}
+
+func (config *ConfigOptions) MakeShardInsertHandler() gtm.ShardInsertHandler {
+	return func(shardInfo *gtm.ShardInfo) (*mgo.Session, error) {
+		log.GetInstance().InfoLog.Printf("Adding shard found at %s\n", shardInfo.GetURL())
+		shardURL := config.GetAuthURL(shardInfo.GetURL())
+		shard, err := config.DialMongo(shardURL)
+		if err == nil {
+			config.ConfigureMongo(shard)
+			return shard, nil
+		} else {
+			return nil, err
+		}
 	}
 }

@@ -18,9 +18,11 @@ import (
 
 	"github.com/AlexsJones/monstache/lib/configuration"
 	"github.com/AlexsJones/monstache/lib/elasticsearch"
+	"github.com/AlexsJones/monstache/lib/find"
 	g "github.com/AlexsJones/monstache/lib/gmt"
 	"github.com/AlexsJones/monstache/lib/index"
 	"github.com/AlexsJones/monstache/lib/log"
+	"github.com/AlexsJones/monstache/lib/mongo"
 	"github.com/AlexsJones/monstache/lib/types"
 	"github.com/coreos/go-systemd/daemon"
 	"github.com/evanphx/json-patch"
@@ -542,7 +544,7 @@ func doIndexing(config *configuration.ConfigOptions, mongo *mgo.Session, bulk *e
 	}
 
 	bulk.Add(req)
-	if meta.shouldSave() {
+	if meta.ShouldSave() {
 		if e := setIndexMeta(mongo, op.Namespace, objectID, meta); e != nil {
 			log.GetInstance().ErrorLog.Printf("Unable to save routing info: %s", e)
 		}
@@ -593,7 +595,7 @@ func dropCollectionMeta(session *mgo.Session, namespace string) (err error) {
 	return
 }
 
-func setIndexMeta(session *mgo.Session, namespace, id string, meta *types.IndexingMeta) error {
+func setIndexMeta(session *mgo.Session, namespace, id string, meta *index.IndexingMeta) error {
 	col := session.DB("monstache").C("meta")
 	metaID := fmt.Sprintf("%s.%s", namespace, id)
 	doc := make(map[string]interface{})
@@ -638,34 +640,34 @@ func loadBuiltinFunctions(s *mgo.Session) {
 		return
 	}
 	for ns, env := range configuration.MapEnvs {
-		var fa *findConf
-		fa = &findConf{
-			session: s,
-			name:    "findId",
-			vm:      env.VM,
-			ns:      ns,
-			byId:    true,
+		var fa *find.FindConf
+		fa = &find.FindConf{
+			Session: s,
+			Name:    "findId",
+			Vm:      env.VM,
+			Ns:      ns,
+			ById:    true,
 		}
-		if err := env.VM.Set(fa.name, makeFind(fa)); err != nil {
+		if err := env.VM.Set(fa.Name, find.MakeFind(fa)); err != nil {
 			panic(err)
 		}
-		fa = &findConf{
-			session: s,
-			name:    "findOne",
-			vm:      env.VM,
-			ns:      ns,
+		fa = &find.FindConf{
+			Session: s,
+			Name:    "findOne",
+			Vm:      env.VM,
+			Ns:      ns,
 		}
-		if err := env.VM.Set(fa.name, makeFind(fa)); err != nil {
+		if err := env.VM.Set(fa.Name, find.MakeFind(fa)); err != nil {
 			panic(err)
 		}
-		fa = &findConf{
-			session: s,
-			name:    "find",
-			vm:      env.VM,
-			ns:      ns,
-			multi:   true,
+		fa = &find.FindConf{
+			Session: s,
+			Name:    "find",
+			Vm:      env.VM,
+			Ns:      ns,
+			Multi:   true,
 		}
-		if err := env.VM.Set(fa.name, makeFind(fa)); err != nil {
+		if err := env.VM.Set(fa.Name, find.MakeFind(fa)); err != nil {
 			panic(err)
 		}
 	}
@@ -673,9 +675,9 @@ func loadBuiltinFunctions(s *mgo.Session) {
 
 func doDelete(mongo *mgo.Session, bulk *elastic.BulkProcessor, op *gtm.Op) {
 	objectID, indexType, meta := g.OpIDToString(op), g.MapIndexType(op), &index.IndexingMeta{}
-	if mapEnvs != nil {
-		if env := mapEnvs[op.Namespace]; env != nil && env.Routing {
-			meta = g.GetIndexMeta(mongo, op.Namespace, objectID)
+	if configuration.MapEnvs != nil {
+		if env := configuration.MapEnvs[op.Namespace]; env != nil && env.Routing {
+			meta = getIndexMeta(mongo, op.Namespace, objectID)
 		}
 	}
 	req := elastic.NewBulkDeleteRequest()
@@ -703,12 +705,12 @@ func doDelete(mongo *mgo.Session, bulk *elastic.BulkProcessor, op *gtm.Op) {
 func (ctx *httpServerCtx) serveHttp() {
 	s := ctx.httpServer
 	if ctx.config.Verbose {
-		infoLog.Printf("Starting http server at %s", s.Addr)
+		log.GetInstance().InfoLog.Printf("Starting http server at %s", s.Addr)
 	}
 	ctx.started = time.Now()
 	err := s.ListenAndServe()
 	if !ctx.shutdown {
-		errorLog.Panicf("Unable to serve http at address %s: %s", s.Addr, err)
+		log.GetInstance().ErrorLog.Panicf("Unable to serve http at address %s: %s", s.Addr, err)
 	}
 }
 
@@ -750,41 +752,41 @@ func (ctx *httpServerCtx) buildServer() {
 	s := &http.Server{
 		Addr:     ctx.config.HTTPServerAddr,
 		Handler:  mux,
-		ErrorLog: errorLog,
+		ErrorLog: log.GetInstance().ErrorLog,
 	}
 	ctx.httpServer = s
 }
 
-func notifySd(config *configuration.ConfigOptions) {
+func NotifySd(config *configuration.ConfigOptions) {
 	var interval time.Duration
 	if config.Verbose {
-		infoLog.Println("Sending systemd READY=1")
+		log.GetInstance().InfoLog.Println("Sending systemd READY=1")
 	}
 	sent, err := daemon.SdNotify(false, "READY=1")
 	if sent {
 		if config.Verbose {
-			infoLog.Println("READY=1 successfully sent to systemd")
+			log.GetInstance().InfoLog.Println("READY=1 successfully sent to systemd")
 		}
 	} else {
-		notifySdFailed(config, err)
+		configuration.NotifySdFailed(config, err)
 		return
 	}
 	interval, err = daemon.SdWatchdogEnabled(false)
 	if err != nil || interval == 0 {
-		watchdogSdFailed(config, err)
+		configuration.WatchdogSdFailed(config, err)
 		return
 	}
 	for {
 		if config.Verbose {
-			infoLog.Println("Sending systemd WATCHDOG=1")
+			log.GetInstance().InfoLog.Println("Sending systemd WATCHDOG=1")
 		}
 		sent, err = daemon.SdNotify(false, "WATCHDOG=1")
 		if sent {
 			if config.Verbose {
-				infoLog.Println("WATCHDOG=1 successfully sent to systemd")
+				log.GetInstance().InfoLog.Println("WATCHDOG=1 successfully sent to systemd")
 			}
 		} else {
-			notifySdFailed(config, err)
+			configuration.NotifySdFailed(config, err)
 			return
 		}
 		time.Sleep(interval / 2)
@@ -794,63 +796,63 @@ func notifySd(config *configuration.ConfigOptions) {
 func main() {
 	enabled := true
 	config := &configuration.ConfigOptions{
-		MongoDialSettings:    mongoDialSettings{Timeout: -1},
-		MongoSessionSettings: mongoSessionSettings{SocketTimeout: -1, SyncTimeout: -1},
-		GtmSettings:          gtmDefaultSettings(),
+		MongoDialSettings:    mongo.MongoDialSettings{Timeout: -1},
+		MongoSessionSettings: mongo.MongoSessionSettings{SocketTimeout: -1, SyncTimeout: -1},
+		GtmSettings:          g.GtmDefaultSettings(),
 	}
-	config.parseCommandLineFlags()
+	config.ParseCommandLineFlags()
 	if config.Version {
 		fmt.Println(version)
 		os.Exit(0)
 	}
-	config.loadConfigFile().setDefaults()
+	config.LoadConfigFile().SetDefaults()
 	if config.Print {
-		config.dump()
+		config.Dump()
 		os.Exit(0)
 	}
-	config.loadPlugins()
+	config.LoadPlugins()
 
 	sigs := make(chan os.Signal, 1)
 	done := make(chan bool, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL)
 
-	mongo, err := config.dialMongo(config.MongoURL)
+	mongo, err := config.DialMongo(config.MongoURL)
 	if err != nil {
-		errorLog.Panicf("Unable to connect to mongodb using URL %s: %s", config.MongoURL, err)
+		log.GetInstance().ErrorLog.Panicf("Unable to connect to mongodb using URL %s: %s", config.MongoURL, err)
 	}
 	if mongoInfo, err := mongo.BuildInfo(); err == nil {
-		infoLog.Printf("Successfully connected to MongoDB version %s", mongoInfo.Version)
+		log.GetInstance().InfoLog.Printf("Successfully connected to MongoDB version %s", mongoInfo.Version)
 	} else {
-		infoLog.Println("Successfully connected to MongoDB")
+		log.GetInstance().InfoLog.Println("Successfully connected to MongoDB")
 	}
 	defer mongo.Close()
-	config.configureMongo(mongo)
+	config.ConfigureMongo(mongo)
 	loadBuiltinFunctions(mongo)
 
-	elasticClient, err := config.newElasticClient()
+	elasticClient, err := config.NewElasticClient()
 	if err != nil {
-		errorLog.Panicf("Unable to create elasticsearch client: %s", err)
+		log.GetInstance().ErrorLog.Panicf("Unable to create elasticsearch client: %s", err)
 	}
 	if config.ElasticVersion == "" {
-		if err := config.testElasticsearchConn(elasticClient); err != nil {
-			errorLog.Panicf("Unable to validate connection to elasticsearch using client %s: %s",
+		if err := config.TestElasticsearchConn(elasticClient); err != nil {
+			log.GetInstance().ErrorLog.Panicf("Unable to validate connection to elasticsearch using client %s: %s",
 				elasticClient, err)
 		}
 	} else {
-		if err := config.parseElasticsearchVersion(config.ElasticVersion); err != nil {
-			errorLog.Panicf("Elasticsearch version must conform to major.minor.fix: %s", err)
+		if err := config.ParseElasticsearchVersion(config.ElasticVersion); err != nil {
+			log.GetInstance().ErrorLog.Panicf("Elasticsearch version must conform to major.minor.fix: %s", err)
 		}
 	}
-	bulk, err := config.newBulkProcessor(elasticClient)
+	bulk, err := config.NewBulkProcessor(elasticClient)
 	if err != nil {
-		errorLog.Panicf("Unable to start bulk processor: %s", err)
+		log.GetInstance().ErrorLog.Panicf("Unable to start bulk processor: %s", err)
 	}
 	defer bulk.Stop()
 	var bulkStats *elastic.BulkProcessor
 	if config.IndexStats {
-		bulkStats, err = config.newStatsBulkProcessor(elasticClient)
+		bulkStats, err = config.NewStatsBulkProcessor(elasticClient)
 		if err != nil {
-			errorLog.Panicf("Unable to start stats bulk processor: %s", err)
+			log.GetInstance().ErrorLog.Panicf("Unable to start stats bulk processor: %s", err)
 		}
 		defer bulkStats.Stop()
 	}
@@ -886,10 +888,10 @@ func main() {
 
 	if config.IndexFiles {
 		if len(config.FileNamespaces) == 0 {
-			errorLog.Fatalln("File indexing is ON but no file namespaces are configured")
+			log.GetInstance().ErrorLog.Fatalln("File indexing is ON but no file namespaces are configured")
 		}
 		for _, namespace := range config.FileNamespaces {
-			if err := ensureFileMapping(elasticClient, namespace, config); err != nil {
+			if err := elasticsearch.EnsureFileMapping(elasticClient, namespace, config); err != nil {
 				panic(err)
 			}
 			if config.ElasticMajorVersion >= 5 {
@@ -900,7 +902,7 @@ func main() {
 
 	var nsFilter, filter, directReadFilter gtm.OpFilter
 	filterChain := []gtm.OpFilter{notMonstache, notSystem, notChunks}
-	if config.isSharded() {
+	if config.IsSharded() {
 		filterChain = append(filterChain, notConfig)
 	}
 	if config.NsRegex != "" {
@@ -932,46 +934,46 @@ func main() {
 	}
 	if config.ClusterName != "" {
 		if err = ensureClusterTTL(mongo); err == nil {
-			infoLog.Printf("Joined cluster %s", config.ClusterName)
+			log.GetInstance().InfoLog.Printf("Joined cluster %s", config.ClusterName)
 		} else {
-			errorLog.Panicf("Unable to enable cluster mode: %s", err)
+			log.GetInstance().ErrorLog.Panicf("Unable to enable cluster mode: %s", err)
 		}
 		enabled, err = enableProcess(mongo, config)
 		if err != nil {
-			errorLog.Panicf("Unable to determine enabled cluster process: %s", err)
+			log.GetInstance().ErrorLog.Panicf("Unable to determine enabled cluster process: %s", err)
 		}
 		if !enabled {
-			config.DirectReadNs = stringargs{}
+			config.DirectReadNs = types.Stringargs{}
 		}
 	}
 	gtmBufferDuration, err := time.ParseDuration(config.GtmSettings.BufferDuration)
 	if err != nil {
-		errorLog.Panicf("Unable to parse gtm buffer duration %s: %s", config.GtmSettings.BufferDuration, err)
+		log.GetInstance().ErrorLog.Panicf("Unable to parse gtm buffer duration %s: %s", config.GtmSettings.BufferDuration, err)
 	}
 	var mongos []*mgo.Session
 	var configSession *mgo.Session
-	if config.isSharded() {
+	if config.IsSharded() {
 		// if we have a config server URL then we are running in a sharded cluster
-		configSession, err = config.dialMongo(config.MongoConfigURL)
+		configSession, err = config.DialMongo(config.MongoConfigURL)
 		if err != nil {
-			errorLog.Panicf("Unable to connect to mongodb config server using URL %s: %s", config.MongoConfigURL, err)
+			log.GetInstance().ErrorLog.Panicf("Unable to connect to mongodb config server using URL %s: %s", config.MongoConfigURL, err)
 		}
-		config.configureMongo(configSession)
+		config.ConfigureMongo(configSession)
 		// get the list of shard servers
 		shardInfos := gtm.GetShards(configSession)
 		if len(shardInfos) == 0 {
-			errorLog.Fatalln("Shards enabled but none found in config.shards collection")
+			log.GetInstance().ErrorLog.Fatalln("Shards enabled but none found in config.shards collection")
 		}
 		// add each shard server to the sync list
 		for _, shardInfo := range shardInfos {
-			infoLog.Printf("Adding shard found at %s\n", shardInfo.GetURL())
-			shardURL := config.getAuthURL(shardInfo.GetURL())
-			shard, err := config.dialMongo(shardURL)
+			log.GetInstance().InfoLog.Printf("Adding shard found at %s\n", shardInfo.GetURL())
+			shardURL := config.GetAuthURL(shardInfo.GetURL())
+			shard, err := config.DialMongo(shardURL)
 			if err != nil {
-				errorLog.Panicf("Unable to connect to mongodb shard using URL %s: %s", shardURL, err)
+				log.GetInstance().ErrorLog.Panicf("Unable to connect to mongodb shard using URL %s: %s", shardURL, err)
 			}
 			defer shard.Close()
-			config.configureMongo(shard)
+			config.ConfigureMongo(shard)
 			mongos = append(mongos, shard)
 		}
 	} else {
@@ -999,14 +1001,15 @@ func main() {
 
 	gtmCtx := gtm.StartMulti(mongos, gtmOpts)
 
-	if config.isSharded() {
-		gtmCtx.AddShardListener(configSession, gtmOpts, config.makeShardInsertHandler())
+	if config.IsSharded() {
+
+		gtmCtx.AddShardListener(configSession, gtmOpts, config.MakeShardInsertHandler())
 	}
 	if config.ClusterName != "" {
 		if enabled {
-			infoLog.Printf("Starting work for cluster %s", config.ClusterName)
+			log.GetInstance().InfoLog.Printf("Starting work for cluster %s", config.ClusterName)
 		} else {
-			infoLog.Printf("Pausing work for cluster %s", config.ClusterName)
+			log.GetInstance().InfoLog.Printf("Pausing work for cluster %s", config.ClusterName)
 			gtmCtx.Pause()
 		}
 	}
@@ -1022,7 +1025,7 @@ func main() {
 	if config.StatsDuration != "" {
 		statsTimeout, err = time.ParseDuration(config.StatsDuration)
 		if err != nil {
-			errorLog.Panicf("Unable to parse stats duration: %s", err)
+			log.GetInstance().ErrorLog.Panicf("Unable to parse stats duration: %s", err)
 		}
 	}
 	printStats := time.NewTicker(statsTimeout)
@@ -1038,7 +1041,7 @@ func main() {
 			}
 		}(gtmCtx, config)
 	}
-	go notifySd(config)
+	go NotifySd(config)
 	var hsc *httpServerCtx
 	if config.EnableHTTPServer {
 		hsc = &httpServerCtx{
@@ -1049,7 +1052,7 @@ func main() {
 		go hsc.serveHttp()
 	}
 	if config.Verbose {
-		infoLog.Println("Entering event loop")
+		log.GetInstance().InfoLog.Println("Entering event loop")
 	}
 	var lastTimestamp, lastSavedTimestamp bson.MongoTimestamp
 	for {
@@ -1086,14 +1089,14 @@ func main() {
 			if enabled {
 				enabled, err = ensureEnabled(mongo, config)
 				if !enabled {
-					infoLog.Printf("Pausing work for cluster %s", config.ClusterName)
+					log.GetInstance().InfoLog.Printf("Pausing work for cluster %s", config.ClusterName)
 					gtmCtx.Pause()
 					bulk.Stop()
 				}
 			} else {
 				enabled, err = enableProcess(mongo, config)
 				if enabled {
-					infoLog.Printf("Resuming work for cluster %s", config.ClusterName)
+					log.GetInstance().InfoLog.Printf("Resuming work for cluster %s", config.ClusterName)
 					bulk.Start(context.Background())
 					resumeWork(gtmCtx, mongo, config)
 				}
@@ -1107,19 +1110,19 @@ func main() {
 			}
 			if config.IndexStats {
 				if err := doIndexStats(config, bulkStats, bulk.Stats()); err != nil {
-					errorLog.Printf("Error indexing statistics: %s", err)
+					log.GetInstance().ErrorLog.Printf("Error indexing statistics: %s", err)
 				}
 			} else {
 				stats, err := json.Marshal(bulk.Stats())
 				if err != nil {
-					errorLog.Printf("Unable to log statistics: %s", err)
+					log.GetInstance().ErrorLog.Printf("Unable to log statistics: %s", err)
 				} else {
-					statsLog.Println(string(stats))
+					log.GetInstance().StatsLog.Println(string(stats))
 				}
 			}
 		case err = <-gtmCtx.ErrC:
 			exitStatus = 1
-			errorLog.Println(err)
+			log.GetInstance().ErrorLog.Println(err)
 			if config.FailFast {
 				os.Exit(exitStatus)
 			}

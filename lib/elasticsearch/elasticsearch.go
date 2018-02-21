@@ -34,14 +34,14 @@ func DeleteIndex(client *elastic.Client, namespace string, config *configuration
 	return err
 }
 
-func ensureFileMapping(client *elastic.Client, namespace string, config *configuration.ConfigOptions) (err error) {
+func EnsureFileMapping(client *elastic.Client, namespace string, config *configuration.ConfigOptions) (err error) {
 	if config.ElasticMajorVersion < 5 {
-		return ensureFileMappingMapperAttachment(client, namespace, config)
+		return EnsureFileMappingMapperAttachment(client, namespace, config)
 	}
-	return ensureFileMappingIngestAttachment(client, namespace, config)
+	return EnsureFileMappingIngestAttachment(client, namespace, config)
 }
 
-func ensureFileMappingIngestAttachment(client *elastic.Client, namespace string, config *configuration.ConfigOptions) (err error) {
+func EnsureFileMappingIngestAttachment(client *elastic.Client, namespace string, config *configuration.ConfigOptions) (err error) {
 	ctx := context.Background()
 	pipeline := map[string]interface{}{
 		"description": "Extract file information",
@@ -57,7 +57,7 @@ func ensureFileMappingIngestAttachment(client *elastic.Client, namespace string,
 	return err
 }
 
-func ensureFileMappingMapperAttachment(conn *elastic.Client, namespace string, config *configuration.ConfigOptions) (err error) {
+func EnsureFileMappingMapperAttachment(conn *elastic.Client, namespace string, config *configuration.ConfigOptions) (err error) {
 	ctx := context.Background()
 	parts := strings.SplitN(namespace, ".", 2)
 	esIndex, esType := utils.NormalizeIndexName(namespace), utils.NormalizeTypeName(parts[1])

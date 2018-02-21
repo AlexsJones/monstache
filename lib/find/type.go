@@ -6,21 +6,21 @@ import (
 )
 
 type FindCall struct {
-	config  *FindConf
-	session *mgo.Session
-	query   interface{}
-	db      string
-	col     string
-	limit   int
-	sort    []string
-	sel     map[string]int
+	Config  *FindConf
+	Session *mgo.Session
+	Query   interface{}
+	Db      string
+	Col     string
+	Limit   int
+	Sort    []string
+	Sel     map[string]int
 }
 
 type FindConf struct {
-	vm      *otto.Otto
-	ns      string
-	name    string
-	session *mgo.Session
-	byId    bool
-	multi   bool
+	Vm      *otto.Otto
+	Ns      string
+	Name    string
+	Session *mgo.Session
+	ById    bool
+	Multi   bool
 }
