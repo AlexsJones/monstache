@@ -17,10 +17,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AlexsJones/monstache/lib/defaults"
+	g "github.com/AlexsJones/monstache/lib/gmt"
+	"github.com/AlexsJones/monstache/lib/index"
 	"github.com/AlexsJones/monstache/lib/log"
+	"github.com/AlexsJones/monstache/lib/mongo"
+	"github.com/AlexsJones/monstache/lib/utils"
 	"github.com/BurntSushi/toml"
 	"github.com/globalsign/mgo"
 	"github.com/robertkrimen/otto"
+	_ "github.com/robertkrimen/otto/underscore"
 	"github.com/rwynn/elastic"
 	"github.com/rwynn/monstache/monstachemap"
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
@@ -38,31 +44,31 @@ func (config *ConfigOptions) newLogger(path string) *lumberjack.Logger {
 func (config *ConfigOptions) setupLogging() {
 	logs := config.Logs
 	if logs.Info != "" {
-		infoLog.SetOutput(config.newLogger(logs.Info))
+		log.GetInstance().InfoLog.SetOutput(config.newLogger(logs.Info))
 	}
 	if logs.Error != "" {
-		errorLog.SetOutput(config.newLogger(logs.Error))
+		log.GetInstance().ErrorLog.SetOutput(config.newLogger(logs.Error))
 	}
 	if logs.Trace != "" {
-		traceLog.SetOutput(config.newLogger(logs.Trace))
+		log.GetInstance().TraceLog.SetOutput(config.newLogger(logs.Trace))
 	}
 	if logs.Stats != "" {
-		statsLog.SetOutput(config.newLogger(logs.Stats))
+		log.GetInstance().StatsLog.SetOutput(config.newLogger(logs.Stats))
 	}
 }
 
 func (config *ConfigOptions) LoadPatchNamespaces() *ConfigOptions {
-	patchNamespaces = make(map[string]bool)
+	PatchNamespaces = make(map[string]bool)
 	for _, namespace := range config.PatchNamespaces {
-		patchNamespaces[namespace] = true
+		PatchNamespaces[namespace] = true
 	}
 	return config
 }
 
 func (config *ConfigOptions) LoadGridFsConfig() *ConfigOptions {
-	fileNamespaces = make(map[string]bool)
+	FileNamespaces = make(map[string]bool)
 	for _, namespace := range config.FileNamespaces {
-		fileNamespaces[namespace] = true
+		FileNamespaces[namespace] = true
 	}
 	return config
 }
@@ -117,8 +123,11 @@ func (config *ConfigOptions) newBulkProcessor(client *elastic.Client) (bulk *ela
 	if config.ElasticMaxBytes != 0 {
 		bulkService.BulkSize(config.ElasticMaxBytes)
 	}
+
 	if config.ElasticRetry == false {
-		bulkService.Backoff(&elastic.StopBackoff{})
+
+		//TODO FIX THIS ISSUE WITH PACKAGE CLASH
+		//bulkService.Backoff(&elastic.StopBackoff{})
 	}
 	bulkService.After(afterBulk)
 	bulkService.FlushInterval(time.Duration(config.ElasticMaxSeconds) * time.Second)
@@ -241,7 +250,7 @@ func watchdogSdFailed(config *ConfigOptions, err error) {
 
 func (config *ConfigOptions) setDefaults() *ConfigOptions {
 	if config.MongoURL == "" {
-		config.MongoURL = mongoURLDefault
+		config.MongoURL = defaults.MongoURLDefault
 	}
 	if config.ClusterName != "" {
 		if config.ClusterName != "" && config.Worker != "" {
@@ -254,14 +263,14 @@ func (config *ConfigOptions) setDefaults() *ConfigOptions {
 		if config.Worker != "" {
 			config.ResumeName = config.Worker
 		} else {
-			config.ResumeName = resumeNameDefault
+			config.ResumeName = defaults.ResumeNameDefault
 		}
 	}
 	if config.ElasticMaxConns == 0 {
-		config.ElasticMaxConns = elasticMaxConnsDefault
+		config.ElasticMaxConns = defaults.ElasticMaxConnsDefault
 	}
 	if config.ElasticClientTimeout == 0 {
-		config.ElasticClientTimeout = elasticClientTimeoutDefault
+		config.ElasticClientTimeout = defaults.ElasticClientTimeoutDefault
 	}
 	if config.MergePatchAttr == "" {
 		config.MergePatchAttr = "json-merge-patches"
@@ -270,7 +279,7 @@ func (config *ConfigOptions) setDefaults() *ConfigOptions {
 		config.ElasticMaxSeconds = 1
 	}
 	if config.ElasticMaxDocs == 0 {
-		config.ElasticMaxDocs = elasticMaxDocsDefault
+		config.ElasticMaxDocs = defaults.ElasticMaxDocsDefault
 	}
 	if config.MongoURL != "" {
 		config.MongoURL = config.parseMongoURL(config.MongoURL)
@@ -444,13 +453,13 @@ func (config *ConfigOptions) parseCommandLineFlags() *ConfigOptions {
 
 func (config *ConfigOptions) loadIndexTypes() {
 	if config.Mapping != nil {
-		mapIndexTypes = make(map[string]*IndexTypeMapping)
+		index.MapIndexTypes = make(map[string]*index.IndexTypeMapping)
 		for _, m := range config.Mapping {
 			if m.Namespace != "" && m.Index != "" && m.Type != "" {
-				mapIndexTypes[m.Namespace] = &IndexTypeMapping{
+				index.MapIndexTypes[m.Namespace] = &index.IndexTypeMapping{
 					Namespace: m.Namespace,
-					Index:     normalizeIndexName(m.Index),
-					Type:      normalizeTypeName(m.Type),
+					Index:     utils.NormalizeIndexName(m.Index),
+					Type:      utils.NormalizeTypeName(m.Type),
 				}
 			} else {
 				panic("Mappings must specify namespace, index, and type attributes")
@@ -515,9 +524,9 @@ func (config *ConfigOptions) loadConfigFile() *ConfigOptions {
 		var tomlConfig = ConfigOptions{
 			DroppedDatabases:     true,
 			DroppedCollections:   true,
-			MongoDialSettings:    mongoDialSettings{Timeout: -1},
-			MongoSessionSettings: mongoSessionSettings{SocketTimeout: -1, SyncTimeout: -1},
-			GtmSettings:          gtmDefaultSettings(),
+			MongoDialSettings:    mongo.MongoDialSettings{Timeout: -1},
+			MongoSessionSettings: mongo.MongoSessionSettings{SocketTimeout: -1, SyncTimeout: -1},
+			GtmSettings:          g.GtmDefaultSettings(),
 		}
 		if _, err := toml.DecodeFile(config.ConfigFile, &tomlConfig); err != nil {
 			panic(err)
@@ -699,4 +708,13 @@ func (config *ConfigOptions) loadConfigFile() *ConfigOptions {
 		tomlConfig.loadIndexTypes()
 	}
 	return config
+}
+
+func (config *ConfigOptions) dump() {
+	json, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		log.GetInstance().ErrorLog.Printf("Unable to print configuration: %s", err)
+	} else {
+		log.GetInstance().InfoLog.Println(string(json))
+	}
 }

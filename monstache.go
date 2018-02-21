@@ -16,6 +16,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AlexsJones/monstache/lib/configuration"
+	"github.com/AlexsJones/monstache/lib/elasticsearch"
+	g "github.com/AlexsJones/monstache/lib/gmt"
+	"github.com/AlexsJones/monstache/lib/index"
 	"github.com/AlexsJones/monstache/lib/log"
 	"github.com/AlexsJones/monstache/lib/types"
 	"github.com/coreos/go-systemd/daemon"
@@ -33,9 +37,6 @@ import (
 
 var gridByteBuffer bytes.Buffer
 
-var fileNamespaces map[string]bool
-var patchNamespaces map[string]bool
-
 var chunksRegex = regexp.MustCompile("\\.chunks$")
 var systemsRegex = regexp.MustCompile("system\\..+$")
 
@@ -44,7 +45,7 @@ const version = "3.6.1"
 type httpServerCtx struct {
 	httpServer *http.Server
 	bulk       *elastic.BulkProcessor
-	config     *types.ConfigOptions
+	config     *configuration.ConfigOptions
 	shutdown   bool
 	started    time.Time
 }
@@ -121,10 +122,10 @@ func deepExportMap(e map[string]interface{}) map[string]interface{} {
 }
 
 func mapDataJavascript(op *gtm.Op) error {
-	if types.MapEnvs == nil {
+	if configuration.MapEnvs == nil {
 		return nil
 	}
-	if env := types.MapEnvs[op.Namespace]; env != nil {
+	if env := configuration.MapEnvs[op.Namespace]; env != nil {
 		arg := convertMapJavascript(op.Data)
 		val, err := env.VM.Call("module.exports", arg, arg)
 		if err != nil {
@@ -163,7 +164,7 @@ func mapDataGolang(s *mgo.Session, op *gtm.Op) error {
 		Operation:  op.Operation,
 		Session:    session,
 	}
-	output, err := types.MapperPlugin(input)
+	output, err := configuration.MapperPlugin(input)
 	if err != nil {
 		return err
 	}
@@ -210,14 +211,14 @@ func mapDataGolang(s *mgo.Session, op *gtm.Op) error {
 	return nil
 }
 
-func mapData(session *mgo.Session, config *types.ConfigOptions, op *gtm.Op) error {
+func mapData(session *mgo.Session, config *configuration.ConfigOptions, op *gtm.Op) error {
 	if config.MapperPluginPath != "" {
 		return mapDataGolang(session, op)
 	}
 	return mapDataJavascript(op)
 }
 
-func prepareDataForIndexing(config *types.ConfigOptions, op *gtm.Op) {
+func prepareDataForIndexing(config *configuration.ConfigOptions, op *gtm.Op) {
 	data := op.Data
 	if config.IndexOplogTime {
 		secs := int64(op.Timestamp >> 32)
@@ -233,7 +234,7 @@ func prepareDataForIndexing(config *types.ConfigOptions, op *gtm.Op) {
 	delete(data, "_meta_monstache")
 }
 
-func addFileContent(s *mgo.Session, op *gtm.Op, config *types.ConfigOptions) (err error) {
+func addFileContent(s *mgo.Session, op *gtm.Op, config *configuration.ConfigOptions) (err error) {
 	session := s.Copy()
 	defer session.Close()
 	op.Data["file"] = ""
@@ -303,7 +304,7 @@ func ensureClusterTTL(session *mgo.Session) error {
 	})
 }
 
-func enableProcess(s *mgo.Session, config *types.ConfigOptions) (bool, error) {
+func enableProcess(s *mgo.Session, config *configuration.ConfigOptions) (bool, error) {
 	session := s.Copy()
 	defer session.Close()
 	col := session.DB("monstache").C("cluster")
@@ -326,12 +327,12 @@ func enableProcess(s *mgo.Session, config *types.ConfigOptions) (bool, error) {
 	return false, err
 }
 
-func resetClusterState(session *mgo.Session, config *types.ConfigOptions) error {
+func resetClusterState(session *mgo.Session, config *configuration.ConfigOptions) error {
 	col := session.DB("monstache").C("cluster")
 	return col.RemoveId(config.ResumeName)
 }
 
-func ensureEnabled(s *mgo.Session, config *types.ConfigOptions) (enabled bool, err error) {
+func ensureEnabled(s *mgo.Session, config *configuration.ConfigOptions) (enabled bool, err error) {
 	session := s.Copy()
 	defer session.Close()
 	col := session.DB("monstache").C("cluster")
@@ -353,7 +354,7 @@ func ensureEnabled(s *mgo.Session, config *types.ConfigOptions) (enabled bool, e
 	return
 }
 
-func resumeWork(ctx *gtm.OpCtxMulti, session *mgo.Session, config *types.ConfigOptions) {
+func resumeWork(ctx *gtm.OpCtxMulti, session *mgo.Session, config *configuration.ConfigOptions) {
 	col := session.DB("monstache").C("monstache")
 	doc := make(map[string]interface{})
 	col.FindId(config.ResumeName).One(doc)
@@ -364,7 +365,7 @@ func resumeWork(ctx *gtm.OpCtxMulti, session *mgo.Session, config *types.ConfigO
 	ctx.Resume()
 }
 
-func saveTimestamp(s *mgo.Session, ts bson.MongoTimestamp, config *types.ConfigOptions) error {
+func saveTimestamp(s *mgo.Session, ts bson.MongoTimestamp, config *configuration.ConfigOptions) error {
 	session := s.Copy()
 	session.SetSocketTimeout(time.Duration(5) * time.Second)
 	session.SetSyncTimeout(time.Duration(5) * time.Second)
@@ -379,29 +380,20 @@ func saveTimestamp(s *mgo.Session, ts bson.MongoTimestamp, config *types.ConfigO
 	return err
 }
 
-func (config *types.ConfigOptions) dump() {
-	json, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		errorLog.Printf("Unable to print configuration: %s", err)
-	} else {
-		infoLog.Println(string(json))
-	}
-}
-
-func doDrop(mongo *mgo.Session, elastic *elastic.Client, op *gtm.Op, config *types.ConfigOptions) (err error) {
+func doDrop(mongo *mgo.Session, elastic *elastic.Client, op *gtm.Op, config *configuration.ConfigOptions) (err error) {
 	if db, drop := op.IsDropDatabase(); drop {
 		if config.DroppedDatabases {
-			if err = deleteIndexes(elastic, db, config); err == nil {
+			if err = elasticsearch.DeleteIndexes(elastic, db, config); err == nil {
 				if e := dropDBMeta(mongo, db); e != nil {
-					errorLog.Printf("Unable to delete metadata for db: %s", e)
+					log.GetInstance().ErrorLog.Printf("Unable to delete metadata for db: %s", e)
 				}
 			}
 		}
 	} else if col, drop := op.IsDropCollection(); drop {
 		if config.DroppedCollections {
-			if err = deleteIndex(elastic, op.GetDatabase()+"."+col, config); err == nil {
+			if err = elasticsearch.DeleteIndex(elastic, op.GetDatabase()+"."+col, config); err == nil {
 				if e := dropCollectionMeta(mongo, op.GetDatabase()+"."+col); e != nil {
-					errorLog.Printf("Unable to delete metadata for collection: %s", e)
+					log.GetInstance().ErrorLog.Printf("Unable to delete metadata for collection: %s", e)
 				}
 			}
 		}
@@ -409,11 +401,11 @@ func doDrop(mongo *mgo.Session, elastic *elastic.Client, op *gtm.Op, config *typ
 	return
 }
 
-func doFileContent(mongo *mgo.Session, op *gtm.Op, config *types.ConfigOptions) (ingestAttachment bool, err error) {
+func doFileContent(mongo *mgo.Session, op *gtm.Op, config *configuration.ConfigOptions) (ingestAttachment bool, err error) {
 	if !config.IndexFiles {
 		return
 	}
-	if fileNamespaces[op.Namespace] {
+	if configuration.FileNamespaces[op.Namespace] {
 		err = addFileContent(mongo, op, config)
 		if config.ElasticMajorVersion >= 5 {
 			if op.Data["file"] != "" {
@@ -424,8 +416,8 @@ func doFileContent(mongo *mgo.Session, op *gtm.Op, config *types.ConfigOptions) 
 	return
 }
 
-func addPatch(config *types.ConfigOptions, client *elastic.Client, op *gtm.Op,
-	objectID string, indexType *types.IndexTypeMapping, meta *types.IndexingMeta) (err error) {
+func addPatch(config *configuration.ConfigOptions, client *elastic.Client, op *gtm.Op,
+	objectID string, indexType *index.IndexTypeMapping, meta *index.IndexingMeta) (err error) {
 	var merges []interface{}
 	var toJSON []byte
 	if op.IsSourceDirect() {
@@ -500,14 +492,14 @@ func addPatch(config *types.ConfigOptions, client *elastic.Client, op *gtm.Op,
 	return
 }
 
-func doIndexing(config *types.ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
-	meta := parseIndexMeta(op)
+func doIndexing(config *configuration.ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
+	meta := g.ParseIndexMeta(op)
 	prepareDataForIndexing(config, op)
-	objectID, indexType := opIDToString(op), mapIndexType(op)
+	objectID, indexType := g.OpIDToString(op), g.MapIndexType(op)
 	if config.EnablePatches {
-		if patchNamespaces[op.Namespace] {
+		if configuration.PatchNamespaces[op.Namespace] {
 			if e := addPatch(config, client, op, objectID, indexType, meta); e != nil {
-				errorLog.Printf("Unable to save json-patch info: %s", e)
+				log.GetInstance().ErrorLog.Printf("Unable to save json-patch info: %s", e)
 			}
 		}
 	}
@@ -552,13 +544,13 @@ func doIndexing(config *types.ConfigOptions, mongo *mgo.Session, bulk *elastic.B
 	bulk.Add(req)
 	if meta.shouldSave() {
 		if e := setIndexMeta(mongo, op.Namespace, objectID, meta); e != nil {
-			errorLog.Printf("Unable to save routing info: %s", e)
+			log.GetInstance().ErrorLog.Printf("Unable to save routing info: %s", e)
 		}
 	}
 	return
 }
 
-func doIndex(config *types.ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
+func doIndex(config *configuration.ConfigOptions, mongo *mgo.Session, bulk *elastic.BulkProcessor, client *elastic.Client, op *gtm.Op, ingestAttachment bool) (err error) {
 	if err = mapData(mongo, config, op); err == nil {
 		if op.Data != nil {
 			err = doIndexing(config, mongo, bulk, client, op, ingestAttachment)
@@ -569,7 +561,7 @@ func doIndex(config *types.ConfigOptions, mongo *mgo.Session, bulk *elastic.Bulk
 	return
 }
 
-func doIndexStats(config *types.ConfigOptions, bulkStats *elastic.BulkProcessor, stats elastic.BulkProcessorStats) (err error) {
+func doIndexStats(config *configuration.ConfigOptions, bulkStats *elastic.BulkProcessor, stats elastic.BulkProcessorStats) (err error) {
 	var hostname string
 	doc := make(map[string]interface{})
 	t := time.Now().UTC()
@@ -616,8 +608,8 @@ func setIndexMeta(session *mgo.Session, namespace, id string, meta *types.Indexi
 	return err
 }
 
-func getIndexMeta(session *mgo.Session, namespace, id string) (meta *types.IndexingMeta) {
-	meta = &indexingMeta{}
+func getIndexMeta(session *mgo.Session, namespace, id string) (meta *index.IndexingMeta) {
+	meta = &index.IndexingMeta{}
 	col := session.DB("monstache").C("meta")
 	doc := make(map[string]interface{})
 	metaID := fmt.Sprintf("%s.%s", namespace, id)
@@ -642,10 +634,10 @@ func getIndexMeta(session *mgo.Session, namespace, id string) (meta *types.Index
 }
 
 func loadBuiltinFunctions(s *mgo.Session) {
-	if mapEnvs == nil {
+	if configuration.MapEnvs == nil {
 		return
 	}
-	for ns, env := range mapEnvs {
+	for ns, env := range configuration.MapEnvs {
 		var fa *findConf
 		fa = &findConf{
 			session: s,
@@ -680,10 +672,10 @@ func loadBuiltinFunctions(s *mgo.Session) {
 }
 
 func doDelete(mongo *mgo.Session, bulk *elastic.BulkProcessor, op *gtm.Op) {
-	objectID, indexType, meta := opIDToString(op), mapIndexType(op), &indexingMeta{}
+	objectID, indexType, meta := g.OpIDToString(op), g.MapIndexType(op), &index.IndexingMeta{}
 	if mapEnvs != nil {
 		if env := mapEnvs[op.Namespace]; env != nil && env.Routing {
-			meta = getIndexMeta(mongo, op.Namespace, objectID)
+			meta = g.GetIndexMeta(mongo, op.Namespace, objectID)
 		}
 	}
 	req := elastic.NewBulkDeleteRequest()
@@ -763,7 +755,7 @@ func (ctx *httpServerCtx) buildServer() {
 	ctx.httpServer = s
 }
 
-func notifySd(config *types.ConfigOptions) {
+func notifySd(config *configuration.ConfigOptions) {
 	var interval time.Duration
 	if config.Verbose {
 		infoLog.Println("Sending systemd READY=1")
@@ -801,7 +793,7 @@ func notifySd(config *types.ConfigOptions) {
 
 func main() {
 	enabled := true
-	config := &types.ConfigOptions{
+	config := &configuration.ConfigOptions{
 		MongoDialSettings:    mongoDialSettings{Timeout: -1},
 		MongoSessionSettings: mongoSessionSettings{SocketTimeout: -1, SyncTimeout: -1},
 		GtmSettings:          gtmDefaultSettings(),
@@ -1039,7 +1031,7 @@ func main() {
 	}
 	exitStatus := 0
 	if len(config.DirectReadNs) > 0 {
-		go func(c *gtm.OpCtxMulti, config *types.ConfigOptions) {
+		go func(c *gtm.OpCtxMulti, config *configuration.ConfigOptions) {
 			c.DirectReadWg.Wait()
 			if config.ExitAfterDirectReads {
 				done <- true

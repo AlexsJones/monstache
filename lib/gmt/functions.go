@@ -12,7 +12,7 @@ import (
 	"github.com/rwynn/gtm"
 )
 
-func defaultIndexTypeMapping(op *gtm.Op) *index.IndexTypeMapping {
+func DefaultIndexTypeMapping(op *gtm.Op) *index.IndexTypeMapping {
 	return &index.IndexTypeMapping{
 		Namespace: op.Namespace,
 		Index:     utils.NormalizeIndexName(op.Namespace),
@@ -20,8 +20,8 @@ func defaultIndexTypeMapping(op *gtm.Op) *index.IndexTypeMapping {
 	}
 }
 
-func mapIndexType(op *gtm.Op) *index.IndexTypeMapping {
-	mapping := defaultIndexTypeMapping(op)
+func MapIndexType(op *gtm.Op) *index.IndexTypeMapping {
+	mapping := DefaultIndexTypeMapping(op)
 	if index.MapIndexTypes != nil {
 		if m := index.MapIndexTypes[op.Namespace]; m != nil {
 			mapping = m
@@ -30,7 +30,7 @@ func mapIndexType(op *gtm.Op) *index.IndexTypeMapping {
 	return mapping
 }
 
-func opIDToString(op *gtm.Op) string {
+func OpIDToString(op *gtm.Op) string {
 	var opIDStr string
 	switch op.Id.(type) {
 	case bson.ObjectId:
@@ -55,7 +55,7 @@ func opIDToString(op *gtm.Op) string {
 	return opIDStr
 }
 
-func gtmDefaultSettings() GtmSettings {
+func GtmDefaultSettings() GtmSettings {
 	return GtmSettings{
 		ChannelSize:    defaults.GtmChannelSizeDefault,
 		BufferSize:     32,
@@ -63,7 +63,7 @@ func gtmDefaultSettings() GtmSettings {
 	}
 }
 
-func parseIndexMeta(op *gtm.Op) (meta *index.IndexingMeta) {
+func ParseIndexMeta(op *gtm.Op) (meta *index.IndexingMeta) {
 	meta = &index.IndexingMeta{
 		Version:     int64(op.Timestamp),
 		VersionType: "external",

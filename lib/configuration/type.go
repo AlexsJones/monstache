@@ -3,6 +3,7 @@ package configuration
 import (
 	g "github.com/AlexsJones/monstache/lib/gmt"
 	"github.com/AlexsJones/monstache/lib/index"
+	"github.com/AlexsJones/monstache/lib/log"
 	"github.com/AlexsJones/monstache/lib/mongo"
 	"github.com/AlexsJones/monstache/lib/types"
 	"github.com/robertkrimen/otto"
@@ -11,6 +12,10 @@ import (
 )
 
 var MapEnvs map[string]*executionEnv
+
+var FileNamespaces map[string]bool
+
+var PatchNamespaces map[string]bool
 
 var MapperPlugin func(*monstachemap.MapperPluginInput) (*monstachemap.MapperPluginOutput, error)
 
@@ -37,7 +42,7 @@ type ConfigOptions struct {
 	MongoDialSettings        mongo.MongoDialSettings    `toml:"mongo-dial-settings"`
 	MongoSessionSettings     mongo.MongoSessionSettings `toml:"mongo-session-settings"`
 	GtmSettings              g.GtmSettings              `toml:"gtm-settings"`
-	Logs                     log.logFiles               `toml:"logs"`
+	Logs                     log.LogFiles               `toml:"logs"`
 	ElasticUrls              types.Stringargs           `toml:"elasticsearch-urls"`
 	ElasticUser              string                     `toml:"elasticsearch-user"`
 	ElasticPassword          string                     `toml:"elasticsearch-password"`

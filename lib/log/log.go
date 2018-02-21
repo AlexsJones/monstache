@@ -6,6 +6,13 @@ import (
 	"sync"
 )
 
+type LogFiles struct {
+	Info  string
+	Error string
+	Trace string
+	Stats string
+}
+
 //Singleton ...
 type Singleton struct {
 	InfoLog  *log.Logger
