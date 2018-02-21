@@ -77,7 +77,7 @@ func TestSetElasticClientScheme(t *testing.T) {
 
 func TestParseSecureMongoUrl(t *testing.T) {
 	c := &configuration.ConfigOptions{MongoURL: "mongo://host:47/db?a=b&ssl=true&c=d"}
-	c.setDefaults()
+	c.SetDefaults()
 	if c.MongoURL != "mongo://host:47/db?a=b&c=d" {
 		t.Fatalf("ssl param not removed from url")
 	}
@@ -85,7 +85,7 @@ func TestParseSecureMongoUrl(t *testing.T) {
 		t.Fatalf("ssl not enabled")
 	}
 	c = &configuration.ConfigOptions{MongoURL: "mongo://host:47/db?a=b&c=d&ssl=true"}
-	c.setDefaults()
+	c.SetDefaults()
 	if c.MongoURL != "mongo://host:47/db?a=b&c=d" {
 		t.Fatalf("ssl param not removed from url")
 	}
@@ -93,7 +93,7 @@ func TestParseSecureMongoUrl(t *testing.T) {
 		t.Fatalf("ssl not enabled")
 	}
 	c = &configuration.ConfigOptions{MongoURL: "mongo://host:47/db?ssl=true"}
-	c.setDefaults()
+	c.SetDefaults()
 	if c.MongoURL != "mongo://host:47/db" {
 		t.Fatalf("ssl param not removed from url")
 	}
@@ -101,7 +101,7 @@ func TestParseSecureMongoUrl(t *testing.T) {
 		t.Fatalf("ssl not enabled")
 	}
 	c = &configuration.ConfigOptions{MongoURL: "mongo://host:47/db?ssl=true&a=b"}
-	c.setDefaults()
+	c.SetDefaults()
 	if c.MongoURL != "mongo://host:47/db?a=b" {
 		t.Fatalf("ssl param not removed from url")
 	}
